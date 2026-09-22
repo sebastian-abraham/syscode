@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SysCode</title>
+    <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+    <style>
+      :root {
+        --bg: #0f1621;
+        --panel: #172433;
+        --line: #2b3d52;
+        --text: #e6edf3;
+        --muted: #90a4b8;
+        --route: #2f80ed;
+        --config: #f2a900;
+        --table: #27ae60;
+        --import: #9b51e0;
+        --other: #7f8c8d;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+      #cy { position: absolute; inset: 0; right: 360px; }
+      #header { position: absolute; top: 0; left: 0; right: 360px; height: 46px;
+        display: flex; align-items: center; gap: 14px; padding: 0 14px;
+        background: rgba(15,22,33,0.9); border-bottom: 1px solid var(--line); z-index: 5; }
+      #header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+      #header .meta { color: var(--muted); font-size: 12px; }
+      #header .spacer { flex: 1; }
+      button { background: #22344a; color: var(--text); border: 1px solid var(--line);
+        border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+      button:hover { background: #2c435e; }
+      #legend { display: flex; gap: 10px; font-size: 11px; color: var(--muted); align-items: center; }
+      #legend span { display: inline-flex; align-items: center; gap: 4px; }
+      #legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+      #panel { position: absolute; top: 0; right: 0; bottom: 0; width: 360px; overflow-y: auto;
+        background: var(--panel); border-left: 1px solid var(--line); padding: 16px; z-index: 6; }
+      #panel h2 { font-size: 16px; margin: 0 0 4px 0; word-break: break-word; }
+      #panel .level { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+      #panel .path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+        color: #b7c7d8; background: #0f1a26; border: 1px solid var(--line); border-radius: 5px;
+        padding: 6px 8px; margin: 10px 0; word-break: break-all; }
+      #panel h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+        margin: 18px 0 8px; }
+      .entry { border: 1px solid var(--line); border-left-width: 3px; border-radius: 6px;
+        padding: 7px 9px; margin-bottom: 7px; background: #13202e; }
+      .entry .name { font-size: 12px; font-family: ui-monospace, Menlo, monospace; word-break: break-word; }
+      .entry .kind { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; float: right;
+        color: var(--muted); }
+      .entry .ev { color: var(--muted); font-size: 11px; margin-top: 3px; word-break: break-all; }
+      .edge { border-bottom: 1px dashed var(--line); padding: 6px 0; font-size: 12px; }
+      .edge:last-child { border-bottom: none; }
+      .edge .arrow { color: var(--muted); }
+      .edge .conf { color: #f2a900; font-size: 11px; }
+      .edge .ev { color: var(--muted); font-size: 11px; word-break: break-all; }
+      .empty { color: var(--muted); font-size: 12px; font-style: italic; }
+    </style>
+  </head>
+  <body>
+    <div id="cy"></div>
+    <div id="header">
+      <h1>SysCode</h1>
+      <span class="meta" id="project-meta"></span>
+      <span class="spacer"></span>
+      <div id="legend">
+        <span><i style="background:var(--route)"></i>route</span>
+        <span><i style="background:var(--config)"></i>config</span>
+        <span><i style="background:var(--table)"></i>table</span>
+        <span><i style="background:var(--import)"></i>import</span>
+      </div>
+      <button id="collapse-all">Collapse all</button>
+    </div>
+    <div id="panel"></div>
+
+    <script>
+      "use strict";
+
+      var KIND_COLORS = {
+        route: "#2f80ed",
+        config: "#f2a900",
+        table: "#27ae60",
+        import: "#9b51e0",
+        other: "#7f8c8d"
+      };
+      // Coloured circles make the kind readable at a glance even inside a
+      // single cytoscape text label (which cannot be styled per line).
+      var KIND_DOTS = { route: "\uD83D\uDD35", config: "\uD83D\uDFE1", table: "\uD83D\uDFE2", import: "\uD83D\uDFE3", other: "\u26AA" };
+
+      var nodes = {};          // id -> node
+      var childrenOf = {};     // id -> [child ids]
+      var allEdges = [];       // raw edges
+      var state = {
+        expanded: {},          // id -> true when children are shown
+        pos: {},               // id -> {x, y}
+        selected: null,
+        fitted: false
+      };
+      var cy = null;
+      var saveTimer = null;
+
+      function kindColor(kind) { return KIND_COLORS[kind] || KIND_COLORS.other; }
+      function dot(kind) { return KIND_DOTS[kind] || KIND_DOTS.other; }
+
+      function log() { if (window.console) console.log.apply(console, arguments); }
+
+      // ---------------------------------------------------------------- data
+      function loadGraph() {
+        return fetch("/api/graph").then(function (r) {
+          if (!r.ok) throw new Error("graph request failed: " + r.status);
+          return r.json();
+        });
+      }
+
+      function indexGraph(graph) {
+        nodes = {};
+        childrenOf = {};
+        graph.nodes.forEach(function (n) {
+          n.interface = n.interface || { exposes: [], needs: [] };
+          n.evidence = n.evidence || [];
+          nodes[n.id] = n;
+          var p = n.parent || "__root__";
+          (childrenOf[p] = childrenOf[p] || []).push(n.id);
+        });
+        Object.keys(childrenOf).forEach(function (k) { childrenOf[k].sort(); });
+        allEdges = graph.edges || [];
+
+        var layout = graph.layout || {};
+        Object.keys(layout).forEach(function (id) {
+          var entry = layout[id] || {};
+          if (typeof entry.x === "number" && typeof entry.y === "number") {
+            state.pos[id] = { x: entry.x, y: entry.y };
+          }
+          if (entry.collapsed === false) state.expanded[id] = true;
+        });
+
+        document.getElementById("project-meta").textContent =
+          (graph.project && graph.project.name ? graph.project.name : "project") +
+          " \u00b7 " + (graph.project && graph.project.stack ? graph.project.stack.join(", ") : "");
+      }
+
+      // ------------------------------------------------------------- visible
+      function visibleSet() {
+        var visible = {};
+        function include(id) {
+          if (visible[id] || !nodes[id]) return;
+          visible[id] = true;
+          if (state.expanded[id]) {
+            (childrenOf[id] || []).forEach(include);
+          }
+        }
+        // roots = level 0 externals and level 1 containers
+        Object.keys(nodes).forEach(function (id) {
+          if (nodes[id].level === 0 || nodes[id].level === 1) include(id);
+        });
+        return visible;
+      }
+
+      function hasChildren(id) { return (childrenOf[id] || []).length > 0; }
+
+      function ancestorVisible(id, visible) {
+        var current = nodes[id];
+        while (current) {
+          if (visible[current.id]) return current.id;
+          current = current.parent ? nodes[current.parent] : null;
+        }
+        return null;
+      }
+
+      // ------------------------------------------------------------ position
+      function siblingIndex(id) {
+        var n = nodes[id];
+        var p = n.parent || "__root__";
+        return (childrenOf[p] || []).indexOf(id);
+      }
+
+      function defaultPos(id, visible, memo) {
+        if (memo[id]) return memo[id];
+        if (state.pos[id]) { memo[id] = state.pos[id]; return memo[id]; }
+        var n = nodes[id];
+        var parent = n.parent && visible[n.parent] ? n.parent : null;
+        var pos;
+        if (parent) {
+          var pp = defaultPos(parent, visible, memo);
+          var idx = siblingIndex(id);
+          pos = { x: pp.x + 40, y: pp.y + 50 + idx * 80 };
+        } else if (n.level === 0) {
+          pos = { x: 60, y: 90 + siblingIndex(id) * 130 };
+        } else {
+          pos = { x: 460, y: 120 + siblingIndex(id) * 340 };
+        }
+        memo[id] = pos;
+        return pos;
+      }
+
+      // ------------------------------------------------------------ elements
+      function entryLine(entry) { return dot(entry.kind) + " " + entry.name; }
+
+      function labelFor(node, isExpanded) {
+        if (isExpanded || node.level >= 3 || node.kind === "external") return node.name;
+        var exposes = (node.interface.exposes || []).slice(0, 3);
+        var needs = (node.interface.needs || []).slice(0, 3);
+        var lines = [node.name];
+        exposes.forEach(function (e) { lines.push(entryLine(e)); });
+        needs.forEach(function (e) { lines.push(entryLine(e)); });
+        var total = (node.interface.exposes || []).length + (node.interface.needs || []).length;
+        var shown = exposes.length + needs.length;
+        if (total > shown) lines.push("+" + (total - shown) + " more");
+        return lines.join("\n");
+      }
+
+      function buildElements(visible) {
+        var elements = [];
+        var memo = {};
+        var expandedIds = {};
+
+        Object.keys(visible).forEach(function (id) {
+          var n = nodes[id];
+          var isExpanded = !!state.expanded[id] && hasChildren(id);
+          expandedIds[id] = isExpanded;
+          var data = {
+            id: id,
+            label: labelFor(n, isExpanded),
+            name: n.name,
+            level: n.level,
+            kind: n.kind
+          };
+          if (n.parent && visible[n.parent]) data.parent = n.parent;
+          elements.push({
+            group: "nodes",
+            data: data,
+            position: defaultPos(id, visible, memo),
+            classes: "lvl" + n.level + (isExpanded ? " expanded" : " collapsed")
+          });
+        });
+
+        var agg = {};
+        allEdges.forEach(function (e) {
+          var from = ancestorVisible(e.from, visible);
+          var to = ancestorVisible(e.to, visible);
+          if (!from || !to || from === to) return;
+          var key = from + "->" + to;
+          if (!agg[key]) agg[key] = { id: key, source: from, target: to, count: 0, kinds: {}, conf: 0 };
+          agg[key].count += 1;
+          agg[key].kinds[e.kind] = true;
+          agg[key].conf = Math.max(agg[key].conf, e.confidence || 0);
+        });
+        Object.keys(agg).forEach(function (key) {
+          var a = agg[key];
+          elements.push({
+            group: "edges",
+            data: {
+              id: a.id,
+              source: a.source,
+              target: a.target,
+              count: a.count,
+              conf: a.conf,
+              kinds: Object.keys(a.kinds).join(", ")
+            }
+          });
+        });
+        return elements;
+      }
+
+      var STYLE = [
+        { selector: "node", style: {
+          "background-color": "#1d2f42",
+          "border-color": "#3d5873",
+          "border-width": 1.5,
+          "color": "#e6edf3",
+          "font-size": 10,
+          "text-wrap": "wrap",
+          "text-max-width": 170,
+          "text-valign": "center",
+          "text-halign": "center",
+          "label": "data(label)",
+          "padding": "10px",
+          "shape": "round-rectangle",
+          "width": "label",
+          "height": "label"
+        }},
+        { selector: "node.lvl0", style: { shape: "ellipse", "background-color": "#20303f", "border-color": "#57452b" } },
+        { selector: "node.lvl1", style: { "background-color": "#1b3a52", "border-color": "#2f80ed", "border-width": 2, "font-size": 12, "font-weight": 600 } },
+        { selector: "node.lvl2", style: { "background-color": "#20402f", "border-color": "#2fae60" } },
+        { selector: "node.lvl3", style: { "background-color": "#2b2440", "border-color": "#9b51e0", "shape": "round-rectangle" } },
+        { selector: "node:parent", style: {
+          "background-opacity": 0.08,
+          "background-color": "#5b7fa6",
+          "border-style": "dashed",
+          "border-width": 1.5,
+          "border-color": "#5b7fa6",
+          "text-valign": "top",
+          "text-margin-y": -8,
+          "padding": "22px",
+          "font-size": 11,
+          "font-weight": 600,
+          "color": "#9fc0e0",
+          "shape": "round-rectangle"
+        }},
+        { selector: "node:selected", style: { "border-color": "#f2a900", "border-width": 3 } },
+        { selector: "edge", style: {
+          "width": 1.6,
+          "line-color": "#5b7fa6",
+          "target-arrow-color": "#5b7fa6",
+          "target-arrow-shape": "triangle",
+          "curve-style": "bezier",
+          "arrow-scale": 0.8,
+          "opacity": 0.9
+        }},
+        { selector: "edge[count > 1]", style: { "line-color": "#f2a900", "target-arrow-color": "#f2a900", "width": 2.4 } }
+      ];
+
+      function rebuild(keepFit) {
+        var visible = visibleSet();
+        var elements = buildElements(visible);
+        var pan = null, zoom = null;
+        if (cy) { pan = cy.pan(); zoom = cy.zoom(); }
+        if (cy) cy.destroy();
+        cy = cytoscape({
+          container: document.getElementById("cy"),
+          elements: elements,
+          style: STYLE,
+          wheelSensitivity: 0.2,
+          minZoom: 0.1,
+          maxZoom: 3
+        });
+        if (pan && zoom) { cy.pan(pan); cy.zoom(zoom); }
+        else if (!state.fitted) { cy.fit(undefined, 60); state.fitted = true; }
+
+        cy.on("tap", "node", function (evt) {
+          var id = evt.target.id();
+          selectNode(id);
+          toggleExpand(id);
+        });
+        cy.on("tap", function (evt) { if (evt.target === cy) { selectNode(null); } });
+        cy.on("position", "node", function (evt) {
+          var p = evt.target.position();
+          state.pos[evt.target.id()] = { x: p.x, y: p.y };
+        });
+        cy.on("dragfree", "node", function () { scheduleSave(); });
+      }
+
+      function toggleExpand(id) {
+        var n = nodes[id];
+        if (!n) return;
+        if (n.level >= 3) return; // artifacts have no children
+        if (!hasChildren(id)) return;
+        if (state.expanded[id]) delete state.expanded[id];
+        else state.expanded[id] = true;
+        rebuild(true);
+        scheduleSave();
+      }
+
+      // ------------------------------------------------------------- saving
+      function scheduleSave() {
+        if (saveTimer) clearTimeout(saveTimer);
+        saveTimer = setTimeout(saveLayout, 400);
+      }
+
+      function saveLayout() {
+        var visible = visibleSet();
+        var layout = {};
+        Object.keys(visible).forEach(function (id) {
+          var pos = state.pos[id];
+          if (!pos && cy) {
+            var ele = cy.getElementById(id);
+            if (ele && ele.length) { pos = ele.position(); state.pos[id] = pos; }
+          }
+          var entry = { collapsed: !state.expanded[id] };
+          if (pos) { entry.x = Math.round(pos.x); entry.y = Math.round(pos.y); }
+          layout[id] = entry;
+        });
+        fetch("/api/layout", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ layout: layout })
+        }).catch(function (err) { log("layout save failed", err); });
+      }
+
+      // ------------------------------------------------------------- panel
+      function esc(value) {
+        return String(value == null ? "" : value)
+          .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      }
+
+      function evidenceHtml(nodeId) {
+        var node = nodes[nodeId];
+        var ev = (node.evidence || []).map(function (e) {
+          return esc(e.file) + ":" + esc(e.line) + (e.text ? "  " + esc(e.text) : "");
+        }).join("<br/>");
+        return '<div class="ev">' + (ev || "no evidence") + "</div>";
+      }
+
+      function entriesHtml(title, entries) {
+        var html = "<h3>" + esc(title) + " (" + entries.length + ")</h3>";
+        if (!entries.length) return html + '<div class="empty">none</div>';
+        entries.forEach(function (e) {
+          html += '<div class="entry" style="border-left-color:' + kindColor(e.kind) + '">' +
+            '<span class="kind" style="color:' + kindColor(e.kind) + '">' + esc(e.kind) + "</span>" +
+            '<div class="name">' + dot(e.kind) + " " + esc(e.name) + "</div>";
+          (e.evidence || []).forEach(function (evidence) {
+            html += '<div class="ev">' + esc(evidence.file) + ":" + esc(evidence.line) +
+              (evidence.text ? "  " + esc(evidence.text) : "") + "</div>";
+          });
+          html += "</div>";
+        });
+        return html;
+      }
+
+      function attachedEdges(nodeId, visible) {
+        if (!visible) visible = visibleSet();
+        var result = [];
+        allEdges.forEach(function (e) {
+          var from = ancestorVisible(e.from, visible);
+          var to = ancestorVisible(e.to, visible);
+          if (from === nodeId || to === nodeId) {
+            result.push({ edge: e, outgoing: from === nodeId, peer: from === nodeId ? to : from });
+          }
+        });
+        return result;
+      }
+
+      function edgesHtml(nodeId, visible) {
+        var list = attachedEdges(nodeId, visible);
+        var html = "<h3>Edges (" + list.length + ")</h3>";
+        if (!list.length) return html + '<div class="empty">none</div>';
+        list.forEach(function (item) {
+          var peer = nodes[item.peer] ? nodes[item.peer].name : item.peer;
+          var arrow = item.outgoing ? "\u2192" : "\u2190";
+          html += '<div class="edge">' +
+            '<span class="arrow">' + arrow + "</span> <strong>" + esc(peer) + "</strong> " +
+            "<em>" + esc(item.edge.kind) + "</em> " +
+            '<span class="conf">conf ' + esc(item.edge.confidence) + "</span>";
+          (item.edge.evidence || []).forEach(function (ev) {
+            html += '<div class="ev">' + esc(ev.file) + ":" + esc(ev.line) +
+              (ev.text ? "  " + esc(ev.text) : "") + "</div>";
+          });
+          html += "</div>";
+        });
+        return html;
+      }
+
+      function selectNode(id) {
+        state.selected = id;
+        var panel = document.getElementById("panel");
+        if (!id || !nodes[id]) {
+          panel.innerHTML = '<div class="empty">Click a block to expand it and see its details.</div>';
+          return;
+        }
+        var n = nodes[id];
+        var visible = visibleSet();
+        var html = "<h2>" + esc(n.name) + "</h2>" +
+          '<div class="level">level ' + n.level + " \u00b7 " + esc(n.kind) +
+          (n.parent && nodes[n.parent] ? " \u00b7 parent " + esc(nodes[n.parent].name) : "") + "</div>" +
+          '<div class="path">' + esc(n.path || "(no path)") + "</div>" +
+          "<h3>Evidence</h3>" + evidenceHtml(id) +
+          entriesHtml("Exposes", n.interface.exposes || []) +
+          entriesHtml("Needs", n.interface.needs || []) +
+          edgesHtml(id, visible);
+        panel.innerHTML = html;
+      }
+
+      // -------------------------------------------------------------- boot
+      function boot() {
+        loadGraph().then(function (graph) {
+          indexGraph(graph);
+          rebuild(false);
+          selectNode(null);
+          document.getElementById("collapse-all").addEventListener("click", function () {
+            state.expanded = {};
+            selectNode(null);
+            rebuild(true);
+            scheduleSave();
+          });
+        }).catch(function (err) {
+          document.getElementById("panel").innerHTML =
+            '<div class="empty">Could not load /api/graph: ' + esc(err.message) + "</div>";
+        });
+      }
+
+      boot();
+    </script>
+  </body>
+</html>

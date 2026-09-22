@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "next": {
+    "EXT": 2,
+    "CONT": 3,
+    "COMP": 5,
+    "CODE": 11
+  },
+  "ids": {
+    "level0:api.openweathermap.org": "EXT-001",
+    "level1:app": "CONT-001",
+    "level1:web": "CONT-002",
+    "level2:app/db.py": "COMP-001",
+    "level2:app/main.py": "COMP-002",
+    "level2:web/app.js": "COMP-003",
+    "level2:web/index.html": "COMP-004",
+    "level3:app/db.py::_connect": "CODE-001",
+    "level3:app/db.py::list_notes": "CODE-002",
+    "level3:app/db.py::save_note": "CODE-003",
+    "level3:app/main.py::NoteIn": "CODE-004",
+    "level3:app/main.py::create_note": "CODE-005",
+    "level3:app/main.py::get_notes": "CODE-006",
+    "level3:app/main.py::get_weather": "CODE-007",
+    "level3:web/app.js::addNote": "CODE-008",
+    "level3:web/app.js::loadNotes": "CODE-009",
+    "level3:web/app.js::loadWeather": "CODE-010"
+  }
+}
