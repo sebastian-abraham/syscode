@@ -46,6 +46,7 @@ export default function Inspector() {
     drillInto,
     addNote,
     deleteNote,
+    openRefine,
   } = useStore();
 
   const nodeId = selected?.id ?? null;
@@ -100,6 +101,7 @@ export default function Inspector() {
             node={selected}
             onAnchor={(i) => void openCodePeek(selected, i)}
             onOpenChildren={() => void drillInto(selected.id)}
+            onRefine={() => void openRefine(selected.id)}
           />
         )}
         {active === 'notes' && selected && (
@@ -128,10 +130,12 @@ function Overview({
   node,
   onAnchor,
   onOpenChildren,
+  onRefine,
 }: {
   node: MapNode;
   onAnchor: (index: number) => void;
   onOpenChildren: () => void;
+  onRefine: () => void;
 }) {
   return (
     <div>
@@ -224,6 +228,16 @@ function Overview({
           <IconChevron size={13} />
         </button>
       )}
+
+      <button
+        type="button"
+        className="btn btn--ghost"
+        style={{ width: '100%', marginTop: 8 }}
+        onClick={onRefine}
+        title="Ask the model to re-name and re-explain this node and its children"
+      >
+        Name and explain with the model
+      </button>
     </div>
   );
 }

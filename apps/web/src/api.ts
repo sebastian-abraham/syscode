@@ -1,5 +1,4 @@
 import type {
-  Anchor,
   ChatEvent,
   ChatMessage,
   EdgeKind,
@@ -7,12 +6,16 @@ import type {
   MapEdge,
   MapNode,
   MapView,
+  MemoryInfo,
+  ModelChoice,
   Note,
   ProjectInfo,
   Proposal,
+  RefineResult,
   RefreshReport,
   ScopedContext,
   SyscodeConfig,
+  WorkspaceInfo,
 } from './types.ts';
 
 /** Shape of a `GET /api/node/:id/code` response — the code peek slice. */
@@ -29,6 +32,35 @@ export interface HealthInfo {
   brain: ProjectInfo['brain'];
 }
 
+/** One provider the interface can offer, from `GET /api/providers`. */
+export interface ProviderInfo {
+  id: SyscodeConfig['provider'];
+  label: string;
+  /** When true the provider needs a key, so the form must ask for one. */
+  needsKey: boolean;
+  hint: string;
+}
+
+export interface ProviderCatalogue {
+  providers: ProviderInfo[];
+  defaultParentDir: string;
+}
+
+/** `GET /api/config/models` — what the configured provider can actually serve. */
+export interface ModelsResponse {
+  brain: ProjectInfo['brain'];
+  models: ModelChoice[];
+}
+
+/** `POST /api/config/probe` — the provider's own words about whether it answers. */
+export interface ProbeResult {
+  ok: boolean;
+  detail: string;
+}
+
+/** The result of opening or creating a project, so the form can show the engine's phrasing. */
+export type WorkspaceActionResult = { ok: true } | { ok: false; error: string };
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -43,6 +75,13 @@ declare global {
     /** Injected by the Tauri shell so the webview can talk to the local engine. */
     __SYSCODE_API_BASE__?: string;
     __SYSCODE_DESKTOP__?: boolean;
+    /** Present only inside the desktop shell. The native directory picker is not
+     *  implemented yet, so calling it throws — callers fall back to a text input. */
+    __TAURI__?: {
+      core?: {
+        invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+      };
+    };
   }
 }
 
@@ -170,11 +209,28 @@ export const api = {
   patchConfig: (body: Partial<SyscodeConfig>) =>
     req<SyscodeConfig>('/config', { method: 'PATCH', body: body as unknown as BodyInit }),
 
-  // ---- Edge mutation helper used by the refresh dialog -------------------
-  applyAnchorPatch: (id: string, anchors: Anchor[]) =>
-    // The contract's PATCH surface has no `anchors` field; re-anchoring is
-    // model-owned, so the interface never fakes it. Kept here for clarity.
-    req<MapNode>(`/node/${enc(id)}`, { method: 'PATCH', body: { } as unknown as BodyInit }).then(() => anchors),
+  // ---- What the provider can actually serve, and whether it answers ------
+  models: () => req<ModelsResponse>('/config/models'),
+  probe: () => req<ProbeResult>('/config/probe', { method: 'POST' }),
+  providers: () => req<ProviderCatalogue>('/providers'),
+
+  // ---- Workspace: the app outside a single project -----------------------
+  workspace: () => req<WorkspaceInfo>('/workspace'),
+  openWorkspace: (path: string) =>
+    req<ProjectInfo>('/workspace/open', { method: 'POST', body: { path } as unknown as BodyInit }),
+  createWorkspace: (body: { name: string; parentDir?: string; template?: 'typescript' | 'empty' }) =>
+    req<ProjectInfo & { created: string[] }>('/workspace/create', {
+      method: 'POST',
+      body: body as unknown as BodyInit,
+    }),
+  forgetWorkspace: (path: string) =>
+    req<WorkspaceInfo>('/workspace/forget', { method: 'POST', body: { path } as unknown as BodyInit }),
+
+  // ---- Memory + refinement: the model owning the map's meaning -----------
+  memory: () => req<MemoryInfo>('/memory'),
+  buildMemory: () => req<MemoryInfo>('/memory/build', { method: 'POST' }),
+  refine: (body: { nodeId?: string | null }) =>
+    req<RefineResult>('/refine', { method: 'POST', body: body as unknown as BodyInit }),
 };
 
 // ---------------------------------------------------------------------------
@@ -276,9 +332,9 @@ export async function streamChat(
   }
 }
 
-/** `GET /api/events` → `map-changed` / `proposal-created` / `refreshed`. */
+/** `GET /api/events` → `map-changed` / `proposal-created` / `refreshed` / `project-changed`. */
 export interface ServerEvent {
-  type: 'map-changed' | 'proposal-created' | 'refreshed';
+  type: 'map-changed' | 'proposal-created' | 'refreshed' | 'project-changed';
   [key: string]: unknown;
 }
 

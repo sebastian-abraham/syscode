@@ -27,4 +27,9 @@ export type {
   ChatMessage,
   JournalEntry,
   SyscodeConfig,
+  RecentProject,
+  WorkspaceInfo,
+  MemoryInfo,
+  RefineResult,
+  ModelChoice,
 } from '../../../packages/core/src/types.ts';

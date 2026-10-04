@@ -8,24 +8,29 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { api, ApiError, streamChat, subscribeEvents, type CodeSlice } from './api.ts';
+import { api, ApiError, streamChat, subscribeEvents, type CodeSlice, type ProbeResult, type ProviderInfo, type WorkspaceActionResult } from './api.ts';
 import type {
   ChatMessage,
   EdgeKind,
   JournalEntry,
   MapNode,
-  MapOp,
   MapView,
+  MemoryInfo,
+  ModelChoice,
   Note,
   ProjectInfo,
   Proposal,
+  RefineResult,
   RefreshReport,
   ScopedContext,
   SyscodeConfig,
+  WorkspaceInfo,
 } from './types.ts';
 
 export type InspectorTab = 'overview' | 'notes' | 'context' | 'journal';
 export type Status = 'loading' | 'waiting' | 'ready';
+/** Whether the app is showing the project picker or a project's map. */
+export type Screen = 'start' | 'map';
 
 export interface Toast {
   id: string;
@@ -44,10 +49,16 @@ interface BusyFlags {
   chat: boolean;
   refresh: boolean;
   node: boolean;
+  workspace: boolean;
+  models: boolean;
+  probe: boolean;
+  memory: boolean;
+  refine: boolean;
 }
 
 export interface StoreValue {
   status: Status;
+  screen: Screen;
   error: string | null;
   project: ProjectInfo | null;
   view: MapView | null;
@@ -68,6 +79,21 @@ export interface StoreValue {
   config: SyscodeConfig | null;
   justAddedId: string | null;
   chatScopeId: string | null;
+
+  // workspace (the app outside a project)
+  workspace: WorkspaceInfo | null;
+  providers: ProviderInfo[];
+  defaultParentDir: string;
+
+  // model connection, for real
+  models: ModelChoice[];
+  modelsBrain: ProjectInfo['brain'] | null;
+
+  // the model owning the map's meaning
+  memory: MemoryInfo | null;
+  refineOpen: boolean;
+  refineTarget: string | null;
+  refineResult: RefineResult | null;
 
   // lifecycle
   init: () => void;
@@ -103,7 +129,6 @@ export interface StoreValue {
   closeRefreshReport: () => void;
   approveProposal: (id: string) => Promise<void>;
   rejectProposal: (id: string) => Promise<void>;
-  applyOps: (ops: MapOp[]) => Promise<{ applied: number; skipped: number }>;
 
   // chat
   sendChat: (text: string, scopeNodeId: string | null) => Promise<void>;
@@ -112,8 +137,27 @@ export interface StoreValue {
   // dialogs
   setAddNodeOpen: (open: boolean) => void;
 
+  // workspace actions
+  goToStart: () => void;
+  resumeCurrent: () => Promise<void>;
+  loadWorkspace: () => Promise<void>;
+  openProject: (path: string) => Promise<WorkspaceActionResult>;
+  createProject: (body: { name: string; parentDir?: string; template?: 'typescript' | 'empty' }) => Promise<WorkspaceActionResult>;
+  forgetProject: (path: string) => Promise<void>;
+  pickDirectory: () => Promise<string | null>;
+
+  // model connection
+  loadModels: () => Promise<void>;
+  probeModel: () => Promise<ProbeResult | null>;
+
+  // memory + refinement
+  loadMemory: () => Promise<void>;
+  buildMemory: () => Promise<void>;
+  openRefine: (nodeId?: string | null) => Promise<void>;
+  closeRefine: () => void;
+
   // config
-  saveConfig: (patch: Partial<SyscodeConfig>) => Promise<void>;
+  saveConfig: (patch: Partial<SyscodeConfig>, opts?: { silent?: boolean }) => Promise<void>;
 
   // toasts
   toast: (level: Toast['level'], text: string) => void;
@@ -143,6 +187,7 @@ function messageFromError(err: unknown): string {
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<Status>('loading');
+  const [screen, setScreen] = useState<Screen>('start');
   const [error, setError] = useState<string | null>(null);
   const [project, setProject] = useState<ProjectInfo | null>(null);
   const [view, setView] = useState<MapView | null>(null);
@@ -152,7 +197,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState<{ id: string; text: string } | null>(null);
-  const [busy, setBusy] = useState<BusyFlags>({ view: false, chat: false, refresh: false, node: false });
+  const [busy, setBusy] = useState<BusyFlags>({
+    view: false,
+    chat: false,
+    refresh: false,
+    node: false,
+    workspace: false,
+    models: false,
+    probe: false,
+    memory: false,
+    refine: false,
+  });
   const [codePeek, setCodePeek] = useState<CodePeekState | null>(null);
   const [inspectorTab, setInspectorTabState] = useState<InspectorTab>('overview');
   const [refreshReport, setRefreshReport] = useState<RefreshReport | null>(null);
@@ -162,8 +217,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [justAddedId, setJustAddedId] = useState<string | null>(null);
   const [chatScopeId, setChatScopeId] = useState<string | null>(null);
 
+  const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [defaultParentDir, setDefaultParentDir] = useState<string>('');
+  const [models, setModels] = useState<ModelChoice[]>([]);
+  const [modelsBrain, setModelsBrain] = useState<ProjectInfo['brain'] | null>(null);
+  const [memory, setMemory] = useState<MemoryInfo | null>(null);
+  const [refineOpen, setRefineOpen] = useState(false);
+  const [refineTarget, setRefineTarget] = useState<string | null>(null);
+  const [refineResult, setRefineResult] = useState<RefineResult | null>(null);
+
   const viewParentRef = useRef<string | null>(null);
   const projectRef = useRef<ProjectInfo | null>(null);
+  /** True once the developer has opened, created or resumed a project, so a late
+   *  init() cannot drag them back to the start screen. */
+  const chosenRef = useRef(false);
   projectRef.current = project;
   const selectedRef = useRef<MapNode | null>(null);
   selectedRef.current = selected;
@@ -231,6 +299,243 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [toast],
   );
 
+  // -------------------------------------------------------------------------
+  // Workspace, model connection, memory — the surfaces outside a single map
+  // -------------------------------------------------------------------------
+
+  const loadWorkspace = useCallback(async () => {
+    try {
+      const ws = await api.workspace();
+      setWorkspace(ws);
+      if (ws.defaultParentDir) setDefaultParentDir((prev) => prev || ws.defaultParentDir);
+    } catch {
+      /* non-fatal: the start screen still offers Open/New */
+    }
+  }, []);
+
+  const loadProviders = useCallback(async () => {
+    try {
+      const catalogue = await api.providers();
+      setProviders(catalogue.providers);
+      setDefaultParentDir(catalogue.defaultParentDir);
+    } catch {
+      /* non-fatal */
+    }
+  }, []);
+
+  const loadModels = useCallback(async () => {
+    setBusy((b) => ({ ...b, models: true }));
+    try {
+      const res = await api.models();
+      setModels(res.models);
+      setModelsBrain(res.brain);
+    } catch (err) {
+      setModels([]);
+      toast('error', `Could not list the models this provider serves: ${messageFromError(err)}`);
+    } finally {
+      setBusy((b) => ({ ...b, models: false }));
+    }
+  }, [toast]);
+
+  const probeModel = useCallback(async (): Promise<ProbeResult | null> => {
+    setBusy((b) => ({ ...b, probe: true }));
+    try {
+      const res = await api.probe();
+      // The engine phrased this; show it verbatim rather than inventing a tick.
+      toast(res.ok ? 'success' : 'warn', res.detail);
+      return res;
+    } catch (err) {
+      toast('error', `The probe could not run: ${messageFromError(err)}`);
+      return null;
+    } finally {
+      setBusy((b) => ({ ...b, probe: false }));
+    }
+  }, [toast]);
+
+  const loadMemory = useCallback(async () => {
+    try {
+      setMemory(await api.memory());
+    } catch {
+      /* non-fatal */
+    }
+  }, []);
+
+  const buildMemory = useCallback(async () => {
+    setBusy((b) => ({ ...b, memory: true }));
+    try {
+      const info = await api.buildMemory();
+      setMemory(info);
+      toast(
+        'success',
+        info.origin === 'model'
+          ? `Project memory written by ${info.model ?? 'the model'}.`
+          : 'Project memory composed from the code facts.',
+      );
+    } catch (err) {
+      toast('error', `Could not build the project memory: ${messageFromError(err)}`);
+    } finally {
+      setBusy((b) => ({ ...b, memory: false }));
+    }
+  }, [toast]);
+
+  const closeRefine = useCallback(() => {
+    setRefineOpen(false);
+    setRefineResult(null);
+    setRefineTarget(null);
+  }, []);
+
+  const openRefine = useCallback(
+    async (nodeId: string | null = null) => {
+      setRefineOpen(true);
+      setRefineTarget(nodeId);
+      setRefineResult(null);
+      setBusy((b) => ({ ...b, refine: true }));
+      try {
+        const res = await api.refine({ nodeId });
+        setRefineResult(res);
+        const proposal = res.proposal;
+        if (proposal) {
+          setProposals((list) => [...list.filter((p) => p.id !== proposal.id), proposal]);
+        }
+        if (res.skipped) toast('info', res.skipped);
+      } catch (err) {
+        toast('error', `Refine failed: ${messageFromError(err)}`);
+      } finally {
+        setBusy((b) => ({ ...b, refine: false }));
+      }
+    },
+    [toast],
+  );
+
+  /**
+   * The engine closed the old map on a switch, so everything is refetched together —
+   * never patched piecemeal. Shared by the project actions and the `project-changed` event.
+   */
+  const reloadProject = useCallback(async () => {
+    const [p, v, props, hist, jr, cfg, mem, ws] = await Promise.all([
+      api.project().catch(() => null),
+      api.map(null).catch(() => null),
+      api.proposals().catch(() => [] as Proposal[]),
+      api.chatHistory().catch(() => [] as ChatMessage[]),
+      api.journal(60).catch(() => [] as JournalEntry[]),
+      api.config().catch(() => null),
+      api.memory().catch(() => null),
+      api.workspace().catch(() => null),
+    ]);
+    if (p) setProject(p);
+    setProposals(props);
+    setChat(hist);
+    setJournal(jr);
+    if (cfg) setConfig(cfg);
+    setMemory(mem);
+    if (ws) {
+      setWorkspace(ws);
+      if (ws.defaultParentDir) setDefaultParentDir(ws.defaultParentDir);
+    }
+    setSelected(null);
+    setSelectedContext(null);
+    setChatScopeId(null);
+    setCodePeek(null);
+    setInspectorTabState('overview');
+    if (v) {
+      setView(v);
+      viewParentRef.current = null;
+      setStatus('ready');
+      setError(null);
+      setScreen('map');
+    } else {
+      setView(null);
+      setStatus('waiting');
+      setError('The engine is reachable but returned no map.');
+    }
+  }, []);
+
+  const openProject = useCallback(
+    async (path: string): Promise<WorkspaceActionResult> => {
+      const target = path.trim();
+      if (!target) return { ok: false, error: 'Give a folder to open.' };
+      setBusy((b) => ({ ...b, workspace: true }));
+      try {
+        await api.openWorkspace(target);
+        chosenRef.current = true;
+        await reloadProject();
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: messageFromError(err) };
+      } finally {
+        setBusy((b) => ({ ...b, workspace: false }));
+      }
+    },
+    [reloadProject],
+  );
+
+  const createProject = useCallback(
+    async (body: { name: string; parentDir?: string; template?: 'typescript' | 'empty' }): Promise<WorkspaceActionResult> => {
+      setBusy((b) => ({ ...b, workspace: true }));
+      try {
+        const created = await api.createWorkspace(body);
+        chosenRef.current = true;
+        await reloadProject();
+        toast('success', `Created ${created.name}${created.created?.length ? ` · ${created.created.length} files` : ''}.`);
+        return { ok: true };
+      } catch (err) {
+        // A refusal (directory exists and is not empty) is shown as the engine phrased it.
+        return { ok: false, error: messageFromError(err) };
+      } finally {
+        setBusy((b) => ({ ...b, workspace: false }));
+      }
+    },
+    [reloadProject, toast],
+  );
+
+  const forgetProject = useCallback(
+    async (path: string) => {
+      try {
+        const ws = await api.forgetWorkspace(path);
+        setWorkspace(ws);
+      } catch (err) {
+        toast('error', `Could not forget the project: ${messageFromError(err)}`);
+      }
+    },
+    [toast],
+  );
+
+  const resumeCurrent = useCallback(async () => {
+    chosenRef.current = true;
+    await reloadProject();
+  }, [reloadProject]);
+
+  const goToStart = useCallback(() => {
+    chosenRef.current = false;
+    setScreen('start');
+    setSelected(null);
+    setSelectedContext(null);
+    setRefineOpen(false);
+    setRefineResult(null);
+    void loadWorkspace();
+  }, [loadWorkspace]);
+
+  /**
+   * The desktop shell may provide a native directory picker; it does not exist yet, so
+   * the call throws in the browser. Return null and let the caller ask for a path.
+   */
+  const pickDirectory = useCallback(async (): Promise<string | null> => {
+    try {
+      const invoke = window.__TAURI__?.core?.invoke;
+      if (typeof invoke === 'function') {
+        const picked = await invoke('pick_directory');
+        if (typeof picked === 'string' && picked.trim()) return picked;
+        if (picked && typeof picked === 'object' && 'path' in picked) {
+          const value = (picked as { path?: unknown }).path;
+          if (typeof value === 'string' && value.trim()) return value;
+        }
+      }
+    } catch {
+      /* no native picker — fall back to a text input */
+    }
+    return null;
+  }, []);
+
   const init = useCallback(async () => {
     setStatus('loading');
     setError(null);
@@ -242,28 +547,25 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setError(messageFromError(err));
       return;
     }
-    const [p, v, props, hist, jr, cfg] = await Promise.all([
-      api.project().catch(() => null),
-      api.map(null).catch(() => null),
-      api.proposals().catch(() => [] as Proposal[]),
-      api.chatHistory().catch(() => [] as ChatMessage[]),
-      api.journal(60).catch(() => [] as JournalEntry[]),
+    // The app opens on the start screen, like an editor: a project is only entered
+    // when the developer chooses one (or resumes the one the engine already serves).
+    const [ws, cat, cfg] = await Promise.all([
+      api.workspace().catch(() => null),
+      api.providers().catch(() => null),
       api.config().catch(() => null),
     ]);
-    if (p) setProject(p);
-    if (v) {
-      setView(v);
-      viewParentRef.current = null;
+    if (ws) setWorkspace(ws);
+    if (cat) {
+      setProviders(cat.providers);
+      setDefaultParentDir(cat.defaultParentDir);
+    } else if (ws?.defaultParentDir) {
+      setDefaultParentDir(ws.defaultParentDir);
     }
-    setProposals(props);
-    setChat(hist);
-    setJournal(jr);
-    setConfig(cfg);
-    if (!v) {
-      setStatus('waiting');
-      setError('The engine is reachable but returned no map.');
-      return;
-    }
+    if (cfg) setConfig(cfg);
+    // Only claim the start screen if the developer has not already chosen a project.
+    // Without this guard, opening a project while init() is still in flight gets
+    // undone a moment later when init() finishes and forces 'start' again.
+    if (!chosenRef.current) setScreen('start');
     setStatus('ready');
   }, []);
 
@@ -271,12 +573,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     void init();
   }, [init]);
 
-  // Live map/proposal events from the engine.
+  // Live engine events. `project-changed` means the engine closed the old map, so
+  // everything is refetched together rather than patched piecemeal.
   useEffect(() => {
     if (status !== 'ready') return;
     const off = subscribeEvents(
       (event) => {
-        if (event.type === 'proposal-created') {
+        if (event.type === 'project-changed') {
+          void reloadProject();
+        } else if (event.type === 'proposal-created') {
           void refreshProposals();
         } else if (event.type === 'map-changed') {
           void loadView(viewParentRef.current, { silent: true });
@@ -290,7 +595,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       },
     );
     return off;
-  }, [status, loadView, refreshProposals, refreshProject]);
+  }, [status, reloadProject, loadView, refreshProposals, refreshProject]);
 
   // -------------------------------------------------------------------------
   // Navigation
@@ -556,61 +861,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [toast],
   );
 
-  const applyOps = useCallback(
-    async (ops: MapOp[]) => {
-      let applied = 0;
-      let skipped = 0;
-      for (const op of ops) {
-        try {
-          switch (op.op) {
-            case 'add-node':
-              await api.createNode({
-                label: op.node.label,
-                summary: op.node.summary,
-                parentId: op.node.parentId ?? null,
-                kind: op.node.kind,
-                position: op.node.position,
-              });
-              applied += 1;
-              break;
-            case 'add-edge':
-              await api.createEdge({ source: op.edge.source, target: op.edge.target, label: op.edge.label, kind: op.edge.kind });
-              applied += 1;
-              break;
-            case 'rename-node':
-              await api.patchNode(op.nodeId, { label: op.label });
-              applied += 1;
-              break;
-            case 'update-summary':
-              await api.patchNode(op.nodeId, { summary: op.summary });
-              applied += 1;
-              break;
-            case 'remove-node':
-              await api.deleteNode(op.nodeId);
-              applied += 1;
-              break;
-            case 'remove-edge':
-              await api.deleteEdge(op.edgeId);
-              applied += 1;
-              break;
-            case 'reanchor-node':
-            case 'move-node':
-              // No direct contract endpoint owns these; the engine applies them
-              // through a proposal, not a raw client patch.
-              skipped += 1;
-              break;
-          }
-        } catch {
-          skipped += 1;
-        }
-      }
-      await loadView(viewParentRef.current, { silent: true });
-      await refreshProject();
-      return { applied, skipped };
-    },
-    [loadView, refreshProject],
-  );
-
   // -------------------------------------------------------------------------
   // Chat
   // -------------------------------------------------------------------------
@@ -681,17 +931,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const setChatScope = useCallback((nodeId: string | null) => setChatScopeId(nodeId), []);
 
   const saveConfig = useCallback(
-    async (patch: Partial<SyscodeConfig>) => {
+    async (patch: Partial<SyscodeConfig>, opts?: { silent?: boolean }) => {
       try {
         const next = await api.patchConfig(patch);
         setConfig(next);
-        await refreshProject();
-        toast('success', next.provider === 'none' ? 'Model disconnected.' : `Connected ${next.provider}${next.model ? ` · ${next.model}` : ''}.`);
+        await Promise.all([refreshProject(), loadWorkspace()]);
+        if (!opts?.silent) {
+          toast(
+            'success',
+            next.provider === 'none'
+              ? 'Model disconnected.'
+              : `Connected ${next.provider}${next.model ? ` · ${next.model}` : ''}.`,
+          );
+        }
       } catch (err) {
         toast('error', `Could not update the model settings: ${messageFromError(err)}`);
       }
     },
-    [refreshProject, toast],
+    [loadWorkspace, refreshProject, toast],
   );
 
   const pendingProposals = useMemo(() => proposals.filter((p) => p.status === 'pending'), [proposals]);
@@ -699,6 +956,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const value = useMemo<StoreValue>(
     () => ({
       status,
+      screen,
       error,
       project,
       view,
@@ -719,6 +977,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       config,
       justAddedId,
       chatScopeId,
+      workspace,
+      providers,
+      defaultParentDir,
+      models,
+      modelsBrain,
+      memory,
+      refineOpen,
+      refineTarget,
+      refineResult,
       init,
       refreshProject,
       loadView,
@@ -742,16 +1009,29 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       closeRefreshReport,
       approveProposal,
       rejectProposal,
-      applyOps,
       sendChat,
       setChatScope,
       setAddNodeOpen,
+      goToStart,
+      resumeCurrent,
+      loadWorkspace,
+      openProject,
+      createProject,
+      forgetProject,
+      pickDirectory,
+      loadModels,
+      probeModel,
+      loadMemory,
+      buildMemory,
+      openRefine,
+      closeRefine,
       saveConfig,
       toast,
       dismissToast,
     }),
     [
       status,
+      screen,
       error,
       project,
       view,
@@ -771,6 +1051,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       config,
       justAddedId,
       chatScopeId,
+      workspace,
+      providers,
+      defaultParentDir,
+      models,
+      modelsBrain,
+      memory,
+      refineOpen,
+      refineTarget,
+      refineResult,
       init,
       refreshProject,
       loadView,
@@ -794,10 +1083,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       closeRefreshReport,
       approveProposal,
       rejectProposal,
-      applyOps,
       sendChat,
       setChatScope,
       saveConfig,
+      goToStart,
+      resumeCurrent,
+      loadWorkspace,
+      openProject,
+      createProject,
+      forgetProject,
+      pickDirectory,
+      loadModels,
+      probeModel,
+      loadMemory,
+      buildMemory,
+      openRefine,
+      closeRefine,
       toast,
       dismissToast,
     ],

@@ -6,6 +6,8 @@ import Inspector from './components/Inspector.tsx';
 import ChatPanel from './components/ChatPanel.tsx';
 import RefreshDialog from './components/RefreshDialog.tsx';
 import AddNodeDialog from './components/AddNodeDialog.tsx';
+import RefineDialog from './components/RefineDialog.tsx';
+import StartScreen from './components/StartScreen.tsx';
 import Toasts from './components/Toasts.tsx';
 import { IconMap } from './components/icons.tsx';
 
@@ -20,6 +22,7 @@ export default function App() {
 function Shell() {
   const {
     status,
+    screen,
     error,
     init,
     view,
@@ -67,6 +70,16 @@ function Shell() {
   if (status === 'loading') return <Splash />;
   if (status === 'waiting') return <Waiting message={error} onRetry={init} />;
 
+  // No project chosen yet: the app opens on the picker, like an editor.
+  if (screen === 'start' || !view) {
+    return (
+      <>
+        <StartScreen />
+        <Toasts />
+      </>
+    );
+  }
+
   return (
     <div className="app">
       <HeaderBar />
@@ -78,6 +91,7 @@ function Shell() {
       <Toasts />
       <RefreshDialog />
       <AddNodeDialog />
+      <RefineDialog />
     </div>
   );
 }

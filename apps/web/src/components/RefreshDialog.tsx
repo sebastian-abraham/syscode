@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useStore } from '../store.tsx';
-import type { DetectedChange, MapOp } from '../types.ts';
+import type { DetectedChange } from '../types.ts';
 import { describeOp } from './ProposalCard.tsx';
 import { IconCheck, IconX } from './icons.tsx';
 
@@ -15,7 +15,7 @@ const CHANGE_LABEL: Record<DetectedChange['kind'], string> = {
 };
 
 export default function RefreshDialog() {
-  const { refreshReport, closeRefreshReport, applyOps, approveProposal, rejectProposal, view, toast } = useStore();
+  const { refreshReport, closeRefreshReport, approveProposal, rejectProposal, view, toast } = useStore();
   const [decisions, setDecisions] = useState<Record<number, Decision>>({});
   const [busyIndex, setBusyIndex] = useState<number | null>(null);
 
@@ -30,20 +30,16 @@ export default function RefreshDialog() {
   const labelFor = (id: string) => view?.nodes.find((n) => n.id === id)?.label ?? id;
 
   const decide = async (index: number, change: DetectedChange, decision: Decision) => {
-    // A detected change is queued in the engine as its own proposal: accepting it is what
-    // re-anchors / renames / moves anything. Nothing is decided in the browser.
+    // Every change is queued in the engine as its own proposal: approving or rejecting it
+    // is what applies it. The client never reimplements the engine's ops.
+    if (!change.proposalId) {
+      toast('warn', 'The engine did not attach a proposal to this change, so it cannot be decided here.');
+      return;
+    }
     setBusyIndex(index);
     try {
-      if (change.proposalId) {
-        if (decision === 'rejected') await rejectProposal(change.proposalId);
-        else await approveProposal(change.proposalId);
-      } else if (decision === 'accepted') {
-        // older engines did not attach a proposal id; fall back to applying the ops directly
-        const result = await applyOps(change.ops ?? []);
-        if (result.skipped > 0) {
-          toast('warn', `${result.applied} change(s) applied; ${result.skipped} need the engine.`);
-        }
-      }
+      if (decision === 'rejected') await rejectProposal(change.proposalId);
+      else await approveProposal(change.proposalId);
       setDecisions((d) => ({ ...d, [index]: decision }));
       toast('success', decision === 'accepted' ? 'Map updated from the code.' : 'Change rejected — the map stays as it was.');
     } catch (err) {
