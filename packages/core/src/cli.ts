@@ -10,6 +10,8 @@
  *   syscode serve <dir>      HTTP API + the interface on :4317
  */
 import path from 'node:path';
+import { realpathSync } from 'node:fs';
+import { isSea } from 'node:sea';
 import { MapService } from './map/service.ts';
 import { analyzeRepo } from './analyze/index.ts';
 import { runChat } from './llm/agent.ts';
@@ -58,8 +60,39 @@ function fmt(n: number): string {
   return n.toLocaleString('en-US');
 }
 
+/**
+ * The user's arguments, whether this runs from source or as a single executable.
+ *
+ * From source, `process.argv` is `[node, cli.ts, ...args]` so we drop two. A single
+ * executable built with Node's `--build-sea` keeps the same shape —
+ * `[execPath, invocation, ...args]` — so it also drops two. The older postject-injected
+ * form has no invocation slot (`[execPath, ...args]`); we detect it by checking whether
+ * `argv[1]` is actually the running executable, and only then drop one. `isSea()` is
+ * false for a normal source run, so the dev invocation is untouched either way.
+ */
+function isInvocationSlot(arg: string | undefined): boolean {
+  if (!arg) return false;
+  const exe = process.execPath;
+  try {
+    if (path.resolve(arg) === exe) return true;
+    if (realpathSync(arg) === realpathSync(exe)) return true;
+  } catch {
+    /* not a resolvable path — fall through to the basename check */
+  }
+  return path.basename(arg) === path.basename(exe);
+}
+
+function userArgs(): string[] {
+  try {
+    if (isSea() && !isInvocationSlot(process.argv[1])) return process.argv.slice(1);
+  } catch {
+    /* node:sea unavailable — treat as a source run */
+  }
+  return process.argv.slice(2);
+}
+
 async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
+  const argv = userArgs();
   const { cmd, target, rest, flags } = parseArgs(argv);
   const root = path.resolve(target || '.');
 

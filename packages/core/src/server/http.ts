@@ -167,10 +167,18 @@ async function switchProject(state: ServerState, dir: string): Promise<MapServic
  * so fall back to the SysCode checkout this engine is running from.
  */
 function resolveWebRoot(root: string): string {
+  // `import.meta.dirname` is undefined in a bundled single-executable build (esbuild
+  // empties `import.meta` for CJS), and `path.resolve(undefined, …)` would throw before
+  // the explicit SYSCODE_WEB is ever consulted. Only offer the checkout fallback when
+  // we actually have a module directory.
+  const fromCheckout =
+    typeof import.meta.dirname === 'string'
+      ? path.resolve(import.meta.dirname, '../../../../apps/web/dist')
+      : null;
   const candidates = [
     process.env.SYSCODE_WEB,
     path.resolve(root, 'apps/web/dist'),
-    path.resolve(import.meta.dirname, '../../../../apps/web/dist'),
+    fromCheckout,
   ].filter(Boolean) as string[];
   for (const c of candidates) if (existsSync(path.join(c, 'index.html'))) return c;
   return candidates[1];
