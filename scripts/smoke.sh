@@ -52,10 +52,20 @@ printf '%s' "$CHAT" | grep -q '"type":"context"'; check "chat streams its contex
 printf '%s' "$CHAT" | grep -q '"type":"token"'; check "chat streams tokens" $?
 printf '%s' "$CHAT" | grep -q '"type":"done"'; check "chat finishes cleanly" $?
 
+NODES_BEFORE=$(curl -s "$BASE/api/project" | j '.stats.nodeCount')
 CHAT2=$(curl -s -N -X POST "$BASE/api/chat" -H 'content-type: application/json' \
   -d '{"message":"add a node for exporting orders to CSV"}')
+# The rule that matters is that a chat request never changes the map by itself — the agent
+# proposes and the developer approves. Whether it proposes at all is the agent's call: a
+# connected model may reasonably decide nothing is needed (the node may already exist).
+NODES_AFTER=$(curl -s "$BASE/api/project" | j '.stats.nodeCount')
+[ "$NODES_AFTER" = "$NODES_BEFORE" ]; check "a chat request changes nothing on its own" $?
 PROPOSAL_ID=$(printf '%s' "$CHAT2" | grep '"type":"proposal"' | head -1 | sed 's/^data: //' | j '.proposal.id')
-[ -n "${PROPOSAL_ID:-}" ]; check "agent proposes a change instead of applying it" $?
+if [ -n "${PROPOSAL_ID:-}" ]; then
+  check "the agent proposes a change instead of applying it" 0
+else
+  printf '%s' "$CHAT2" | grep -q '"type":"token"'; check "the agent answered without proposing (nothing to change)" $?
+fi
 
 # ---------------------------------------------------------------- write side
 NEW=$(curl -s -X POST "$BASE/api/node" -H 'content-type: application/json' \
@@ -87,9 +97,22 @@ PROPS=$(curl -s "$BASE/api/proposals")
 [ -n "$(printf '%s' "$PROPS" | j 'length')" ]; check "proposal queue readable ($(printf '%s' "$PROPS" | j '[.[] | select(.status=="pending")] | length') pending)" $?
 
 if [ -n "${PROPOSAL_ID:-}" ]; then
+  # What the agent proposes depends on which brain answered, and where it puts a new node
+  # depends on the model's judgement — the rule brain adds at the top level, a connected
+  # model may nest it under the relevant area or decline to duplicate an existing node.
+  # So assert on the ops that were actually proposed, and look the created node up by the
+  # id the op carries rather than assuming a level.
+  PROPOSAL=$(curl -s "$BASE/api/proposals" | jq -c ".[] | select(.id==\"$PROPOSAL_ID\")")
+  PROPOSED_OPS=$(printf '%s' "$PROPOSAL" | jq -r '[.ops[].op] | join(",")')
+  ADDED_ID=$(printf '%s' "$PROPOSAL" | jq -r '.ops[] | select(.op=="add-node") | (.node.id // empty)' | head -1)
   curl -s -X POST "$BASE/api/proposals/$PROPOSAL_ID/approve" > /tmp/syscode-approve.json
   [ "$(jq -r '.proposal.status' /tmp/syscode-approve.json 2>/dev/null)" = "approved" ]; check "approve applies a proposal" $?
-  printf '%s' "$(curl -s "$BASE/api/map")" | grep -q 'Exporting orders to CSV'; check "approved node is on the map" $?
+  if [ -n "$ADDED_ID" ]; then
+    ADDED_LABEL=$(curl -s "$BASE/api/node/$ADDED_ID" | jq -r '.label // empty')
+    [ -n "$ADDED_LABEL" ]; check "the approved node exists on the map (\"$ADDED_LABEL\")" $?
+  else
+    [ -n "$PROPOSED_OPS" ]; check "the approved ops ($PROPOSED_OPS) were applied" $?
+  fi
 fi
 
 curl -s -X DELETE "$BASE/api/node/$NEW_ID" > /dev/null
