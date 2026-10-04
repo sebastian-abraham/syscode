@@ -127,6 +127,22 @@ fn stop_engine(state: tauri::State<'_, EngineProcess>) -> Result<String, String>
     Ok("no engine started by this window".into())
 }
 
+/// Native folder picker for the start screen ("Open a folder").
+///
+/// Runs as an async command on purpose: Tauri executes these off the main thread,
+/// which is what makes the blocking dialog safe to call. Returns `None` when the
+/// developer cancels, so the interface can leave the field alone rather than
+/// clearing it.
+#[tauri::command]
+async fn pick_directory(app: tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    app.dialog()
+        .file()
+        .blocking_pick_folder()
+        .and_then(|picked| picked.into_path().ok())
+        .map(|path| path.display().to_string())
+}
+
 /// Unlock high-refresh rendering.
 ///
 /// WebKitGTK keeps an internal feature named `PreferPageRenderingUpdatesNear60FPS`
@@ -347,8 +363,14 @@ fn main() {
         std::env::var("SYSCODE_PROJECT").unwrap_or_else(|_| repo_root().display().to_string());
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(EngineProcess(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![engine_status, start_engine, stop_engine])
+        .invoke_handler(tauri::generate_handler![
+            engine_status,
+            start_engine,
+            stop_engine,
+            pick_directory
+        ])
         .setup(move |app| {
             let spawn_result = spawn_engine(&project, port);
             match &spawn_result {
