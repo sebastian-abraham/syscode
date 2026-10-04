@@ -23,10 +23,21 @@ Working, verified, and meant to be built on:
 | **Reconcile, not regenerate** — a refresh diffs the map against the code and produces *changes*: re-anchor, rename, move, remove. Meaning changes go into a proposal for approval; user edits are never overwritten. | done |
 | **The mapper** (heuristic brain) — groups the repo into a handful of meaningful areas, descending past container directories, and explains each one from the facts. No model required. | done |
 | **Scoped context + memory** — what the agent gets for a node: its explanation, the anchored code, relationships, notes, constraints and project memory, inside a token budget with visible truncation. | done |
-| **The agent** — model-agnostic (OpenAI-compatible, Anthropic, Ollama). With no model configured it answers from the map itself and proposes changes; with one configured it answers from scoped context and emits structured proposals. | done |
-| **The interface** — React canvas: semantic zoom (drill into a node's contents), inspector with anchors, code peek, notes, the "what the agent sees" context panel, approval cards, stale markers, honest provenance badges. | done |
+| **The agent** — model-agnostic (OpenCode Go, OpenAI-compatible, Anthropic, Ollama). With a model connected it answers from scoped context, proposes structured changes, **names and explains the map**, and **writes the project's memory**. With none connected the deterministic mapper and a rule-based agent take over, and the interface says so. | done |
+| **Project memory** — a mapping pass that reads the facts, the map and the project's README and writes a short brief the agent reuses: what this is, the stack, the layout, conventions and gotchas, entry points. Labelled `model` or `facts` so you always know which. | done |
+| **Refinement** — the model re-names and re-explains nodes from the facts behind them, and reports what it thinks of the grouping. Arrives as a proposal; the map changes only when you accept it. | done |
+| **The interface** — start screen (recent projects, open a folder, create a project), React canvas with semantic zoom, inspector with anchors and code peek, the "what the agent sees" context panel, approval cards, stale markers, honest provenance badges. | done |
 | **Desktop shell** — Tauri v2 wrapper that starts the local engine and points the webview at it. | scaffold + build |
-| **Agent writes code** | not yet — the agent proposes design changes; it does not yet edit files |
+| **Agent writes code** | not yet — the agent proposes design changes and explains the system; it does not yet edit files |
+
+### Where the model actually sits
+
+The map is a **harness for a model**, not a diagram generator. The deterministic analysis and
+the mapper exist for two reasons: to give the model facts it cannot hallucinate, and to keep the
+tool useful when no model is configured. The model owns the meaning — naming, grouping,
+explanation, memory — and the facts keep it honest. That split is the product: a model that is
+powerful enough to not care about the code itself still needs to be told what is really there,
+and a developer still needs to see the system at the level they care about.
 
 ## Quickstart
 
@@ -55,6 +66,13 @@ node packages/core/src/cli.ts show    fixtures/demo-app --all
 node packages/core/src/cli.ts context fixtures/demo-app --find Orders
 node packages/core/src/cli.ts ask     fixtures/demo-app "what depends on Persistence?"
 node packages/core/src/cli.ts ask     fixtures/demo-app "add a node for exporting orders to CSV"
+
+# with a model configured
+node packages/core/src/cli.ts probe   fixtures/demo-app      # does it actually answer?
+node packages/core/src/cli.ts memory  fixtures/demo-app      # the mapping pass, printed
+node packages/core/src/cli.ts refine  fixtures/demo-app      # let the model name the map
+node packages/core/src/cli.ts refine  fixtures/demo-app --apply
+node packages/core/src/cli.ts workspace                      # projects opened before
 ```
 
 ### Interface
@@ -72,17 +90,28 @@ npx tauri build -w @syscode/desktop            # full bundle (deb/AppImage), nee
 SYSCODE_PROJECT=/path/to/project ./apps/desktop/src-tauri/target/release/syscode-desktop
 ```
 
-### Connecting a model (optional)
+### Connecting a model
 
-Nothing about SysCode requires a model: without one it runs the deterministic mapper and the
-rule-based agent, and the interface says so in the header. To connect one:
+This is the point of the tool — the map is how the model explains itself to you. The provider
+layer is model-agnostic; **OpenCode Go** is first-class:
 
 ```bash
+# OpenCode Go (opencode.ai/zen/go). The key is read from OPENCODE_GO_API_KEY, or from
+# ~/.hermes/.env on a machine that already runs Hermes.
+SYSCODE_PROVIDER=opencode-go SYSCODE_MODEL=deepseek-v4.1-flash npm run serve -- fixtures/demo-app
+
+# any OpenAI-compatible endpoint
 SYSCODE_PROVIDER=openai-compatible SYSCODE_BASE_URL=https://api.groq.com/openai/v1 \
 SYSCODE_API_KEY=... SYSCODE_MODEL=llama-3.3-70b-versatile npm run serve -- fixtures/demo-app
 ```
 
-or `PATCH /api/config` (what the "Connect a model" button does). Keys live in
+Or set it in the app (start screen → Connect a model, or the header). Whatever you configure,
+the interface can **test it** (`POST /api/config/probe`) and list what the provider can actually
+serve (`GET /api/config/models`), so "connected" is never a claim without evidence.
+
+Once connected, three things change: the agent answers with real reasoning instead of the rule
+brain, **Refine** lets it rename and re-explain the map from the facts, and **Build project
+memory** gives it a written understanding of the project it keeps between sessions. Keys live in
 `<project>/.syscode/config.json` or the environment — never in the repo.
 
 ## Verification
