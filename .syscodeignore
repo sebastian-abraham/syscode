@@ -1,0 +1,6 @@
+# Directories that are not part of the system being mapped.
+fixtures/
+docs/
+node_modules/
+.syscode/
+scripts/

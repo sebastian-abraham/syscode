@@ -1,0 +1,23 @@
+{
+  "name": "syscode",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "An agentic dev tool built around a living design map",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "map": "node packages/core/src/cli.ts map",
+    "serve": "node packages/core/src/cli.ts serve",
+    "show": "node packages/core/src/cli.ts show",
+    "web": "npm run dev -w @syscode/web",
+    "build:web": "npm run build -w @syscode/web",
+    "verify": "bash scripts/smoke.sh && bash scripts/stability.sh",
+    "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p apps/web/tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@syscode/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SysCode core engine: deterministic analysis, the living map model, memory, and the agent loop",
+  "main": "src/index.ts",
+  "bin": {
+    "syscode": "./src/cli.ts"
+  },
+  "dependencies": {
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1"
+  }
+}

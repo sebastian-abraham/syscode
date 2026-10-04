@@ -1,0 +1,29 @@
+# Node / TypeScript
+node_modules/
+dist/
+*.tsbuildinfo
+
+# SysCode's own state, written into a mapped project's root
+.syscode/
+syscode.graph.json
+syscode.journal.jsonl
+syscode.chat.jsonl
+
+# Tauri / Rust
+target/
+apps/desktop/src-tauri/target/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Python leftovers (the v0 prototype)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
