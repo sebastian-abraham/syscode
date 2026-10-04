@@ -125,18 +125,32 @@ export async function suggestRefinements(
   ].join('\n');
 
   let raw = '';
-  try {
-    for await (const chunk of streamChat(brain, {
-      system: SYSTEM,
-      messages: [{ role: 'user', content: user }],
-      temperature: 0.3,
-      maxTokens: 1600,
-      signal: opts.signal,
-    })) {
-      raw += chunk;
+  let lastError = '';
+  // A long stream occasionally drops mid-flight. One retry turns a transient failure
+  // into a slow success, and the second failure is reported rather than hidden.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    raw = '';
+    try {
+      for await (const chunk of streamChat(brain, {
+        system: SYSTEM,
+        messages: [{ role: 'user', content: user }],
+        temperature: 0.3,
+        // Generous: one JSON entry per node, each with a sentence or two of explanation.
+        // Too small a budget truncates the array mid-way and makes it unparseable.
+        maxTokens: 3000,
+        signal: opts.signal,
+      })) {
+        raw += chunk;
+      }
+      lastError = '';
+      break;
+    } catch (err) {
+      lastError = (err as Error).message.slice(0, 200);
+      if (opts.signal?.aborted) break;
     }
-  } catch (err) {
-    return { suggestions: [], error: `Model call failed: ${(err as Error).message.slice(0, 200)}`, raw };
+  }
+  if (lastError) {
+    return { suggestions: [], error: `Model call failed: ${lastError}`, raw };
   }
 
   const parsed = parseSuggestions(raw, targets);
@@ -186,15 +200,64 @@ export function extractJsonArray(raw: string): unknown[] | undefined {
     for (let i = text.indexOf('['); i !== -1; i = text.indexOf('[', i + 1)) {
       const slice = balancedArray(text, i);
       if (!slice) continue;
-      try {
-        const parsed = JSON.parse(slice);
-        if (Array.isArray(parsed) && parsed.some((e) => e && typeof e === 'object' && 'key' in (e as object))) return parsed;
-      } catch {
-        /* try the next start */
+      for (const attempt of [slice, escapeControlCharsInStrings(slice)]) {
+        try {
+          const parsed = JSON.parse(attempt);
+          if (Array.isArray(parsed) && parsed.some((e) => e && typeof e === 'object' && 'key' in (e as object))) return parsed;
+        } catch {
+          /* try the repaired form, then the next start */
+        }
       }
     }
   }
   return undefined;
+}
+
+/**
+ * Models routinely put literal newlines and tabs inside JSON strings, which is invalid
+ * JSON but very common for multi-sentence values like our summaries. Escape control
+ * characters that sit inside a string, leaving the structure untouched.
+ */
+export function escapeControlCharsInStrings(jsonish: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (const ch of jsonish) {
+    if (inString) {
+      if (escaped) {
+        out += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        out += ch;
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+        out += ch;
+        continue;
+      }
+      if (ch === '\n') {
+        out += '\\n';
+        continue;
+      }
+      if (ch === '\r') {
+        out += '\\r';
+        continue;
+      }
+      if (ch === '\t') {
+        out += '\\t';
+        continue;
+      }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    out += ch;
+  }
+  return out;
 }
 
 /** The substring from `start` to its matching `]`, ignoring brackets inside strings. */
