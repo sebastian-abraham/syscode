@@ -496,8 +496,12 @@ fn start_probe_listener(app: tauri::AppHandle) -> u16 {
     port
 }
 
-/// Injected into the page by the harness: after load + a short warm-up, count
-/// `requestAnimationFrame` callbacks for ~3s and report the rate to the listener.
+/// Injected into the page by the harness: after load + a short warm-up, sample
+/// `requestAnimationFrame` deltas for a few seconds and report the distribution.
+///
+/// An average frame rate hides stutter: a page can tick at 120fps and still drop a 50ms
+/// frame every second, which is what a person actually notices. So report the spread —
+/// median, p95, worst, and how many frames missed the display's own interval.
 fn probe_script(port: u16) -> String {
     format!(
         r#"(function(){{
@@ -505,7 +509,7 @@ fn probe_script(port: u16) -> String {
   if (window.__SYSCODE_FPS_PROBE__) return;
   window.__SYSCODE_FPS_PROBE__ = true;
   var PORT = {port};
-  var WARMUP_MS = 500, MEASURE_MS = 3000;
+  var WARMUP_MS = 500, MEASURE_MS = 4000;
   function report(payload) {{
     try {{
       fetch('http://127.0.0.1:' + PORT + '/fps', {{
@@ -516,17 +520,74 @@ fn probe_script(port: u16) -> String {
       }}).catch(function(){{}});
     }} catch (e) {{}}
   }}
+  // Synthetic interaction: selection repaints the scaled layer, which is the case the
+  // owner reports as stuttery.
+  function interact() {{
+    try {{
+      var nodes = document.querySelectorAll('.react-flow__node');
+      if (!nodes.length) return false;
+      var n = nodes[Math.floor(Math.random() * nodes.length)];
+      var r = n.getBoundingClientRect();
+      var b = {{ bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0, buttons: 1 }};
+      ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t) {{
+        n.dispatchEvent(t.indexOf('pointer') === 0
+          ? new PointerEvent(t, {{ bubbles: b.bubbles, cancelable: b.cancelable, clientX: b.clientX, clientY: b.clientY, pointerId: 1, isPrimary: true, pointerType: 'mouse' }})
+          : new MouseEvent(t, b));
+      }});
+      return true;
+    }} catch (e) {{ return false; }}
+  }}
+  // The interface opens on its project picker, so the map is not on screen yet. Open the
+  // first project before measuring, or the numbers describe the picker instead of the canvas.
+  function openProject(then) {{
+    if (document.querySelector('.react-flow__node')) return then();
+    // The picker's markup has changed across revisions; try the known shapes, then fall
+    // back to any button that looks like a project row (it shows an absolute path).
+    var sels = ['.recent__body--button', '.recent__body', '[class*="recent"] button', '[class*="project"] button', '[class*="card"] button'];
+    var target = null;
+    for (var i = 0; i < sels.length && !target; i++) target = document.querySelector(sels[i]);
+    if (!target) {{
+      var all = document.querySelectorAll('button');
+      for (var j = 0; j < all.length; j++) {{
+        var t = (all[j].textContent || '');
+        if (t.indexOf('/home/') !== -1 || t.indexOf('/tmp/') !== -1) {{ target = all[j]; break; }}
+      }}
+    }}
+    if (!target) return then();
+    target.click();
+    var waited = 0;
+    var iv = setInterval(function() {{
+      waited += 250;
+      if (document.querySelector('.react-flow__node') || waited > 10000) {{ clearInterval(iv); then(); }}
+    }}, 250);
+  }}
   function measure() {{
-    var start = performance.now(), frames = 0;
+    var start = performance.now(), frames = 0, last = start, deltas = [];
+    var interacted = 0;
+    var withInput = location.search.indexOf('interact') !== -1 || window.__SYSCODE_FPS_INTERACT__;
     function tick() {{
-      frames++;
       var now = performance.now();
+      deltas.push(now - last);
+      last = now;
+      frames++;
+      if (withInput && frames % 30 === 0 && interact()) interacted++;
       if (now - start >= MEASURE_MS) {{
         var ms = now - start;
+        var sorted = deltas.slice(1).sort(function(a, b) {{ return a - b; }});
+        var at = function(q) {{ return sorted.length ? Math.round(sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] * 100) / 100 : null; }};
+        var over = function(ms) {{ return sorted.filter(function(d) {{ return d > ms; }}).length; }};
         report({{
           fps: Math.round((frames * 1000 / ms) * 100) / 100,
           frames: frames,
           ms: Math.round(ms * 100) / 100,
+          median: at(0.5),
+          p95: at(0.95),
+          worst: sorted.length ? Math.round(sorted[sorted.length - 1] * 100) / 100 : null,
+          missed120: over(9.5),
+          missed60: over(18),
+          long: over(33),
+          interacted: interacted,
+          nodes: document.querySelectorAll('.react-flow__node').length,
           href: location.href
         }});
         return;
@@ -535,7 +596,7 @@ fn probe_script(port: u16) -> String {
     }}
     requestAnimationFrame(tick);
   }}
-  function begin() {{ setTimeout(measure, WARMUP_MS); }}
+  function begin() {{ setTimeout(function() {{ openProject(measure); }}, WARMUP_MS); }}
   if (document.readyState === 'complete') begin();
   else window.addEventListener('load', begin, {{ once: true }});
 }})();"#
@@ -577,7 +638,8 @@ fn main() {
                 Err(err) => eprintln!("[syscode] engine unavailable: {err}"),
             }
             let init = format!(
-                "window.__SYSCODE_API_BASE__ = 'http://127.0.0.1:{port}'; window.__SYSCODE_DESKTOP__ = true;",
+                "window.__SYSCODE_API_BASE__ = 'http://127.0.0.1:{port}'; window.__SYSCODE_DESKTOP__ = true; window.__SYSCODE_FPS_INTERACT__ = {};",
+                std::env::var("SYSCODE_FPS_INTERACT").is_ok()
             );
 
             // If the engine is up, load the interface *from* it: same origin, so the API
