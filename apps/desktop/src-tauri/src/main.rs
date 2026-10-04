@@ -107,14 +107,24 @@ fn default_project() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Locate an engine: an explicit override, a bundled one beside the executable, or a
-/// source checkout driven by node.
+/// Locate an engine, in order of who is most likely to be right:
+///
+/// 1. `SYSCODE_ENGINE` — an explicit override always wins.
+/// 2. A source checkout, because a checkout means someone is working on this engine and
+///    expects their edits to take effect. `tauri build` leaves the bundled engine next to
+///    the binary, so a copy being present says nothing about which one is wanted.
+/// 3. The bundled engine beside the executable — the installed app's payload.
 fn find_engine() -> Option<Engine> {
     if let Ok(path) = std::env::var("SYSCODE_ENGINE") {
         let p = PathBuf::from(path);
         if p.exists() {
             return Some(Engine::Bundled(p));
         }
+    }
+
+    let script = repo_root().join("packages/core/src/cli.ts");
+    if script.exists() {
+        return Some(Engine::NodeScript(script));
     }
 
     if let Ok(exe) = std::env::current_exe() {
@@ -129,10 +139,6 @@ fn find_engine() -> Option<Engine> {
         }
     }
 
-    let script = repo_root().join("packages/core/src/cli.ts");
-    if script.exists() {
-        return Some(Engine::NodeScript(script));
-    }
     None
 }
 
