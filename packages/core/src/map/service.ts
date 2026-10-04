@@ -401,11 +401,19 @@ export class MapService {
   }
 
   addProposal(input: { title: string; rationale: string; ops: MapOp[]; origin?: Proposal['origin'] }): Proposal {
+    // Give structural ops their ids up front. A proposal is then inspectable before it is
+    // applied — an interface can key on the node it would create, and a test can look it up
+    // afterwards — instead of the id only existing once someone approves it.
+    const ops = input.ops.map((op) => {
+      if (op.op === 'add-node' && !op.node.id) return { ...op, node: { ...op.node, id: newId('n') } };
+      if (op.op === 'add-edge' && !op.edge.id) return { ...op, edge: { ...op.edge, id: newId('e') } };
+      return op;
+    });
     const p: Proposal = {
       id: newId('prop'),
       title: input.title,
       rationale: input.rationale,
-      ops: input.ops,
+      ops,
       status: 'pending',
       origin: input.origin ?? 'inferred',
       createdAt: new Date().toISOString(),
