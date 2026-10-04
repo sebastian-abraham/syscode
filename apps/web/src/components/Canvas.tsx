@@ -85,7 +85,7 @@ function Flow() {
 
   const [nodes, setNodes, onNodesChange] = useNodesState<SysNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<SysEdge>([]);
-  const { fitView } = useReactFlow();
+  const { fitView, setViewport } = useReactFlow();
   const lastFitRef = useRef<string>('__none__');
   const [pending, setPending] = useState<{ source: string; target: string } | null>(null);
   const [pendingLabel, setPendingLabel] = useState('');
@@ -98,7 +98,13 @@ function Flow() {
       return v.nodes.map((node) => ({
         id: node.id,
         type: 'sysNode' as const,
-        position: fallback?.get(node.id) ?? { x: node.position?.x ?? 0, y: node.position?.y ?? 0 },
+        // Whole pixels only. The canvas is scaled, so a fractional position lands the node
+        // on a fraction of a device pixel: the text inside is then resampled on every
+        // repaint and goes soft — visibly so right after a selection repaints the layer.
+        position: (() => {
+          const p = fallback?.get(node.id) ?? { x: node.position?.x ?? 0, y: node.position?.y ?? 0 };
+          return { x: Math.round(p.x), y: Math.round(p.y) };
+        })(),
         width: 260,
         data: {
           node,
@@ -216,6 +222,14 @@ function Flow() {
         onNodeClick={onNodeClick}
         onNodeDoubleClick={onNodeDoubleClick}
         onNodeDragStop={(_e, node) => void moveNode(node.id, node.position)}
+        // When the gesture ends, settle the canvas on whole pixels. The whole map is drawn
+        // inside one scaled layer, so a fractional translation makes every repaint resample
+        // the text — this is what keeps it from going soft after an interaction.
+        onMoveEnd={(_e, viewport) => {
+          const x = Math.round(viewport.x);
+          const y = Math.round(viewport.y);
+          if (x !== viewport.x || y !== viewport.y) void setViewport({ x, y, zoom: viewport.zoom });
+        }}
         onConnect={onConnect}
         onPaneClick={() => {
           setPending(null);
