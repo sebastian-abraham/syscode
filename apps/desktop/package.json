@@ -1,0 +1,15 @@
+{
+  "name": "@syscode/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tauri shell around the SysCode engine and interface",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icon": "python3 src-tauri/scripts/make-icon.py",
+    "cargo:build": "cargo build --release --manifest-path src-tauri/Cargo.toml"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.1"
+  }
+}
