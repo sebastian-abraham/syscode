@@ -1,12 +1,24 @@
 import { useEffect, useState } from 'react';
 import { useStore } from '../store.tsx';
+import { useUi } from '../ui.tsx';
 import ProposalCard from './ProposalCard.tsx';
 import ModelDialog from './ModelDialog.tsx';
 import MemoryDialog from './MemoryDialog.tsx';
-import { IconAlert, IconLayers, IconMap, IconPlus, IconRefresh, IconSpark } from './icons.tsx';
+import {
+  IconAlert,
+  IconLayers,
+  IconMap,
+  IconMoon,
+  IconPanel,
+  IconPlus,
+  IconRefresh,
+  IconSpark,
+  IconSun,
+} from './icons.tsx';
 
 export default function HeaderBar() {
   const { project, view, pendingProposals, refresh, busy, setAddNodeOpen, goToStart, openRefine } = useStore();
+  const { theme, toggleTheme, chatOpen, toggleChat } = useUi();
   const [propsOpen, setPropsOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
@@ -38,7 +50,7 @@ export default function HeaderBar() {
 
       <div className="header__spacer" />
 
-      <div className="header__group">
+      <div className="header__group header__group--status">
         <button
           type="button"
           className={`brain-badge brain-badge--${heuristic ? 'heuristic' : 'model'}`}
@@ -57,7 +69,8 @@ export default function HeaderBar() {
 
         {heuristic && (
           <button type="button" className="btn btn--ghost btn--sm" onClick={() => setModelOpen(true)}>
-            Connect a model
+            <IconSpark size={12} />
+            <span className="btn__label">Connect a model</span>
           </button>
         )}
 
@@ -77,7 +90,7 @@ export default function HeaderBar() {
           title="What the agent has understood about this project"
         >
           <IconLayers size={14} />
-          Memory
+          <span className="btn__label">Memory</span>
         </button>
 
         <button
@@ -88,7 +101,7 @@ export default function HeaderBar() {
           title="Ask the model to re-name and re-explain the map — arrives as a proposal"
         >
           <IconSpark size={14} className={busy.refine ? 'spin' : undefined} />
-          {busy.refine ? 'Refining…' : 'Refine'}
+          <span className="btn__label">{busy.refine ? 'Refining…' : 'Refine'}</span>
         </button>
 
         <button
@@ -99,7 +112,7 @@ export default function HeaderBar() {
           title="Re-analyze the repo and diff it against the map"
         >
           <IconRefresh size={14} className={busy.refresh ? 'spin' : undefined} />
-          {busy.refresh ? 'Refreshing…' : 'Refresh'}
+          <span className="btn__label">{busy.refresh ? 'Refreshing…' : 'Refresh'}</span>
         </button>
 
         <div style={{ position: 'relative' }}>
@@ -109,7 +122,7 @@ export default function HeaderBar() {
             onClick={() => setPropsOpen((v) => !v)}
             title="Pending design proposals"
           >
-            Proposals
+            <span className="btn__label">Proposals</span>
             <span className={`badge-count${pending === 0 ? ' badge-count--muted' : ''}`}>{pending}</span>
           </button>
           {propsOpen && pending > 0 && (
@@ -127,7 +140,29 @@ export default function HeaderBar() {
 
         <button type="button" className="btn btn--primary" onClick={() => setAddNodeOpen(true)}>
           <IconPlus size={14} />
-          Add node
+          <span className="btn__label">Add node</span>
+        </button>
+      </div>
+
+      <div className="header__group header__group--view">
+        <button
+          type="button"
+          className={`btn btn--icon${chatOpen ? ' btn--active' : ''}`}
+          onClick={toggleChat}
+          aria-pressed={chatOpen}
+          title={chatOpen ? 'Hide the agent panel' : 'Show the agent panel'}
+        >
+          <IconPanel size={15} />
+        </button>
+
+        <button
+          type="button"
+          className="btn btn--icon"
+          onClick={toggleTheme}
+          title={theme === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme'}
+          aria-label={theme === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme'}
+        >
+          {theme === 'dark' ? <IconSun size={15} /> : <IconMoon size={15} />}
         </button>
       </div>
 

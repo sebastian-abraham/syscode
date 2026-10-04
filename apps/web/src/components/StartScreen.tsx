@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useStore } from '../store.tsx';
+import { useUi } from '../ui.tsx';
 import ModelDialog from './ModelDialog.tsx';
-import { IconFolder, IconMap, IconPlus, IconSpark, IconX } from './icons.tsx';
+import { IconFolder, IconMap, IconMoon, IconPlus, IconSpark, IconSun, IconX } from './icons.tsx';
 
 /**
  * The app outside a project. Like an editor it opens here when no project is chosen:
@@ -22,6 +23,7 @@ export default function StartScreen() {
   const [createError, setCreateError] = useState<string | null>(null);
 
   const [modelOpen, setModelOpen] = useState(false);
+  const { theme, toggleTheme } = useUi();
 
   const current = workspace?.current ?? null;
   const recent = workspace?.recent ?? [];
@@ -64,6 +66,15 @@ export default function StartScreen() {
 
   return (
     <div className="start">
+      <button
+        type="button"
+        className="btn btn--icon start__theme"
+        onClick={toggleTheme}
+        title={theme === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme'}
+        aria-label={theme === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme'}
+      >
+        {theme === 'dark' ? <IconSun size={15} /> : <IconMoon size={15} />}
+      </button>
       <div className="start__inner">
         <div className="start__brand">
           <span className="header__mark" aria-hidden="true">

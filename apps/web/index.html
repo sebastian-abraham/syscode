@@ -3,8 +3,33 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="dark light" />
     <title>SysCode — living design map</title>
+    <!-- Set the theme before the bundle paints: an explicit choice from localStorage, else the
+         OS preference. Without this the app would flash dark on a light-mode machine. The
+         stylesheet reads the same attribute (see the [data-theme="light"] token block). -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem('syscode.theme');
+          var theme =
+            stored === 'light' || stored === 'dark'
+              ? stored
+              : window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+                ? 'light'
+                : 'dark';
+          document.documentElement.setAttribute('data-theme', theme);
+          document.documentElement.style.colorScheme = theme;
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      })();
+    </script>
+    <style>
+      /* Paint the shell background in the right tone before the bundle's CSS lands. */
+      html { background: #0b0c0f; }
+      html[data-theme='light'] { background: #eceef2; }
+    </style>
   </head>
   <body>
     <div id="root"></div>

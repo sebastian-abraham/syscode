@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { StoreProvider, useStore } from './store.tsx';
+import { UiProvider, useUi } from './ui.tsx';
 import HeaderBar from './components/HeaderBar.tsx';
 import Canvas from './components/Canvas.tsx';
 import Inspector from './components/Inspector.tsx';
@@ -13,9 +14,11 @@ import { IconMap } from './components/icons.tsx';
 
 export default function App() {
   return (
-    <StoreProvider>
-      <Shell />
-    </StoreProvider>
+    <UiProvider>
+      <StoreProvider>
+        <Shell />
+      </StoreProvider>
+    </UiProvider>
   );
 }
 
@@ -34,6 +37,7 @@ function Shell() {
     climbOut,
     clearSelection,
   } = useStore();
+  const { chatOpen, setChatOpen } = useUi();
 
   // Esc climbs out of the current level (or closes a dialog first). Dialogs and
   // the inline connect form handle their own Esc in the capture phase.
@@ -86,7 +90,18 @@ function Shell() {
       <div className="workspace">
         <Canvas />
         <Inspector />
-        <ChatPanel />
+        {chatOpen && <ChatPanel />}
+        {/* Below 1024px the panels float over the map; this scrim catches a click to dismiss
+            them and is hidden by CSS on wide layouts. */}
+        {(chatOpen || !!selected) && (
+          <div
+            className="panel-scrim"
+            onClick={() => {
+              setChatOpen(false);
+              clearSelection();
+            }}
+          />
+        )}
       </div>
       <Toasts />
       <RefreshDialog />

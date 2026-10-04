@@ -17,6 +17,7 @@ import {
 } from '@xyflow/react';
 import type { EdgeKind, MapEdge, MapNode, MapView } from '../types.ts';
 import { useStore } from '../store.tsx';
+import { useUi, type Theme } from '../ui.tsx';
 import { NodeCard, type SysNode, type SysNodeData } from './NodeCard.tsx';
 import SysEdgeComponent from './SysEdge.tsx';
 import Breadcrumb from './Breadcrumb.tsx';
@@ -30,11 +31,36 @@ type SysEdge = Edge<{ edge: MapEdge }>;
 
 const EDGE_KINDS: EdgeKind[] = ['depends', 'data', 'triggers', 'stores', 'uses', 'custom'];
 
-const ORIGIN_COLOR: Record<string, string> = {
-  verified: '#79b892',
-  inferred: '#c9a86a',
-  user: '#8aa9f5',
-  planned: '#a78bd6',
+/**
+ * The colours React Flow draws itself — dots, arrowheads, the minimap and the
+ * in-flight connection line. They are passed as props, not CSS, so they cannot
+ * come from a token; each theme gets its own set here and `colorMode` keeps the
+ * built-in chrome (controls, minimap frame) in step.
+ */
+const CANVAS: Record<Theme, {
+  dot: string;
+  edgeMarker: string;
+  connection: string;
+  minimapMask: string;
+  fallback: string;
+  origin: Record<string, string>;
+}> = {
+  dark: {
+    dot: '#191c22',
+    edgeMarker: '#3a3f4b',
+    connection: '#4a5170',
+    minimapMask: 'rgba(9, 10, 13, 0.72)',
+    fallback: '#3a3f4b',
+    origin: { verified: '#79b892', inferred: '#c9a86a', user: '#8aa9f5', planned: '#a78bd6' },
+  },
+  light: {
+    dot: '#ccd2dd',
+    edgeMarker: '#98a2b2',
+    connection: '#7d8798',
+    minimapMask: 'rgba(236, 238, 242, 0.66)',
+    fallback: '#c3c9d4',
+    origin: { verified: '#2f8a5b', inferred: '#a9761c', user: '#3b62d0', planned: '#7a4fc0' },
+  },
 };
 
 /** Top-down fallback when the engine returns no usable positions. */
@@ -72,7 +98,6 @@ export default function Canvas() {
 function Flow() {
   const {
     view,
-    selected,
     busy,
     justAddedId,
     selectNode,
@@ -82,6 +107,8 @@ function Flow() {
     moveNode,
     createEdge,
   } = useStore();
+  const { theme } = useUi();
+  const c = CANVAS[theme];
 
   const [nodes, setNodes, onNodesChange] = useNodesState<SysNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<SysEdge>([]);
@@ -130,9 +157,9 @@ function Flow() {
         label: e.label,
         type: 'sysEdge' as const,
         data: { edge: e },
-        markerEnd: { type: MarkerType.ArrowClosed, width: 13, height: 13, color: '#3a3f4b' },
+        markerEnd: { type: MarkerType.ArrowClosed, width: 13, height: 13, color: c.edgeMarker },
       }));
-  }, []);
+  }, [c]);
 
   useEffect(() => {
     if (!view) {
@@ -140,7 +167,12 @@ function Flow() {
       setEdges([]);
       return undefined;
     }
-    setNodes(buildNodes(view));
+    // Keep whatever is selected selected: this rebuild replaces every node object, and
+    // React Flow's own selection flag lives on those objects.
+    setNodes((current) => {
+      const wasSelected = new Set(current.filter((n) => n.selected).map((n) => n.id));
+      return buildNodes(view).map((n) => (wasSelected.has(n.id) ? { ...n, selected: true } : n));
+    });
     setEdges(buildEdges(view));
     const key = view.parent?.id ?? '__root__';
     if (lastFitRef.current !== key) {
@@ -153,10 +185,12 @@ function Flow() {
     return undefined;
   }, [view, buildNodes, buildEdges, setNodes, setEdges, fitView]);
 
-  // React Flow's own `selected` flag drives the highlight ring.
-  useEffect(() => {
-    setNodes((current) => current.map((n) => ({ ...n, selected: !!selected && n.id === selected.id })));
-  }, [selected, setNodes]);
+  // Selection is React Flow's own: clicking a node sets `selected` on that node and
+  // re-renders it alone. This used to be mirrored into the whole nodes array on every
+  // selection change, which rebuilt every node object — so a single click repainted the
+  // entire (scaled) canvas layer. Measured in the real webview: 108 frames missed per
+  // 4s of clicking, and the text went soft while it re-rasterized. The store's selection
+  // is still what drives the inspector; the canvas no longer needs to know about it.
 
   // Escape cancels a pending connection before the shell's climb-out handler.
   useEffect(() => {
@@ -207,8 +241,8 @@ function Flow() {
 
   const minimapNodeColor = useCallback((n: Node) => {
     const data = n.data as SysNodeData | undefined;
-    return ORIGIN_COLOR[data?.node?.origin ?? ''] ?? '#3a3f4b';
-  }, []);
+    return c.origin[data?.node?.origin ?? ''] ?? c.fallback;
+  }, [c]);
 
   return (
     <>
@@ -241,17 +275,18 @@ function Flow() {
         nodesConnectable
         proOptions={{ hideAttribution: true }}
         defaultEdgeOptions={{ type: 'default' }}
-        connectionLineStyle={{ stroke: '#4a5170', strokeWidth: 1.6 }}
+        colorMode={theme}
+        connectionLineStyle={{ stroke: c.connection, strokeWidth: 1.6 }}
         elevateEdgesOnSelect
       >
-        <Background variant={BackgroundVariant.Dots} gap={26} size={1} color="#191c22" />
+        <Background variant={BackgroundVariant.Dots} gap={26} size={1} color={c.dot} />
         <Controls showInteractive={false} position="bottom-left" />
         <MiniMap
           pannable
           zoomable
           nodeColor={minimapNodeColor}
           nodeStrokeWidth={0}
-          maskColor="rgba(9,10,13,0.72)"
+          maskColor={c.minimapMask}
           style={{ width: 148, height: 96 }}
         />
       </ReactFlow>
