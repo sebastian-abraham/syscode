@@ -14,10 +14,16 @@
     "show": "node packages/core/src/cli.ts show",
     "web": "npm run dev -w @syscode/web",
     "build:web": "npm run build -w @syscode/web",
+    "build:engine": "node scripts/build-engine.mjs",
+    "package:desktop": "npm run build:web && npm run build:engine && npm run build -w @syscode/desktop",
     "verify": "bash scripts/smoke.sh && bash scripts/stability.sh",
     "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p apps/web/tsconfig.json"
   },
   "engines": {
     "node": ">=22.5"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6"
   }
 }
