@@ -245,10 +245,53 @@ export interface JournalEntry {
 }
 
 export interface SyscodeConfig {
-  provider: 'none' | 'openai-compatible' | 'anthropic' | 'ollama';
+  provider: 'none' | 'openai-compatible' | 'anthropic' | 'ollama' | 'opencode-go';
   baseUrl?: string;
   model?: string;
   /** Present only when written to .syscode/config.json; never committed. */
   apiKey?: string;
   maxContextTokens: number;
+}
+
+/** A project the developer has opened before, for the start screen. */
+export interface RecentProject {
+  path: string;
+  name: string;
+  openedAt: string;
+  /** Set when the directory has since disappeared. */
+  missing?: boolean;
+}
+
+export interface WorkspaceInfo {
+  current: ProjectInfo;
+  recent: RecentProject[];
+  /** Where new projects are created by default. */
+  defaultParentDir: string;
+}
+
+/** What the agent has understood about the project, kept between sessions. */
+export interface MemoryInfo {
+  text: string;
+  origin: 'model' | 'facts';
+  builtAt?: string;
+  model?: string;
+}
+
+/** Outcome of asking a model to re-name, re-group or re-explain part of the map. */
+export interface RefineResult {
+  proposal: Proposal | null;
+  nodesTouched: number;
+  brain: ProjectInfo['brain'];
+  /** Why nothing was proposed, when that is the case. */
+  skipped?: string;
+  /** What the model actually said, so a failure can be diagnosed rather than guessed at. */
+  raw?: string;
+}
+
+/** One model offered by the configured provider. */
+export interface ModelChoice {
+  id: string;
+  /** False when this client cannot speak the shape that model needs. */
+  supported: boolean;
+  note?: string;
 }

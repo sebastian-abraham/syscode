@@ -1,8 +1,14 @@
 /**
  * Model-agnostic configuration. Nothing here assumes a provider; the interface,
  * the engine and the CLI all read the same resolved brain.
+ *
+ * Provider notes worth keeping:
+ *  - opencode-go (opencode.ai/zen/go) speaks plain OpenAI chat, but requires an
+ *    `x-opencode-session` header on every chat call and routes some model families
+ *    through other endpoints entirely (see provider.ts).
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import type { SyscodeConfig } from './types.ts';
 
@@ -23,6 +29,29 @@ export const DEFAULT_CONFIG: SyscodeConfig = {
 
 export function configPath(root: string): string {
   return path.join(root, '.syscode', 'config.json');
+}
+
+/** Where SysCode keeps the list of projects the developer has opened. */
+export function workspaceDir(): string {
+  const base = process.env.XDG_CONFIG_HOME || path.join(homedir(), '.config');
+  return path.join(base, 'syscode');
+}
+
+/**
+ * Convenience for a machine that already runs Hermes: its credential file holds the
+ * OpenCode Go key. We never copy the key anywhere, and an explicit env var still wins.
+ */
+function readEnvFileValue(name: string, file = path.join(homedir(), '.hermes', '.env')): string | undefined {
+  try {
+    const text = readFileSync(file, 'utf8');
+    for (const line of text.split('\n')) {
+      const m = new RegExp(`^\\s*${name}\\s*=\\s*(.+)$`).exec(line);
+      if (m) return m[1].trim().replace(/^["']|["']$/g, '');
+    }
+  } catch {
+    /* no such file — fine */
+  }
+  return undefined;
 }
 
 export function loadConfig(root: string): SyscodeConfig {
@@ -53,11 +82,24 @@ export function saveConfig(root: string, patch: Partial<SyscodeConfig>): Syscode
   return next;
 }
 
-const PROVIDER_DEFAULTS: Record<string, { baseUrl: string; envKey?: string[] }> = {
+const PROVIDER_DEFAULTS: Record<string, { baseUrl: string; envKey?: string[]; envFile?: string[] }> = {
   ollama: { baseUrl: 'http://localhost:11434' },
-  'openai-compatible': { baseUrl: 'https://api.openai.com/v1', envKey: ['OPENAI_API_KEY', 'GROQ_API_KEY', 'OPENROUTER_API_KEY', 'SYSCODE_API_KEY'] },
+  'openai-compatible': {
+    baseUrl: 'https://api.openai.com/v1',
+    envKey: ['OPENAI_API_KEY', 'GROQ_API_KEY', 'OPENROUTER_API_KEY', 'SYSCODE_API_KEY'],
+  },
   anthropic: { baseUrl: 'https://api.anthropic.com', envKey: ['ANTHROPIC_API_KEY'] },
+  'opencode-go': {
+    baseUrl: 'https://opencode.ai/zen/go/v1',
+    envKey: ['OPENCODE_GO_API_KEY', 'SYSCODE_API_KEY'],
+    envFile: ['OPENCODE_GO_API_KEY'],
+  },
 };
+
+export function providerDefaults(provider: SyscodeConfig['provider']): { baseUrl: string } | undefined {
+  const d = PROVIDER_DEFAULTS[provider];
+  return d ? { baseUrl: d.baseUrl } : undefined;
+}
 
 export function resolveBrain(cfg: SyscodeConfig, env: NodeJS.ProcessEnv = process.env): Brain {
   if (cfg.provider === 'none' || !cfg.provider) {
@@ -73,6 +115,15 @@ export function resolveBrain(cfg: SyscodeConfig, env: NodeJS.ProcessEnv = proces
     for (const k of defaults.envKey) {
       if (env[k]) {
         apiKey = env[k];
+        break;
+      }
+    }
+  }
+  if (!apiKey && defaults.envFile) {
+    for (const k of defaults.envFile) {
+      const v = readEnvFileValue(k);
+      if (v) {
+        apiKey = v;
         break;
       }
     }
@@ -93,4 +144,15 @@ export function brainInfo(brain: Brain): { mode: 'heuristic' | 'model'; provider
   return brain.mode === 'model'
     ? { mode: 'model', provider: brain.provider, model: brain.model ?? 'default' }
     : { mode: 'heuristic' };
+}
+
+/** The providers the interface should offer, with what each needs. */
+export function providerCatalogue(): { id: SyscodeConfig['provider']; label: string; needsKey: boolean; hint: string }[] {
+  return [
+    { id: 'none', label: 'No model', needsKey: false, hint: 'Deterministic mapper only. Everything still works; the map is labelled as heuristic.' },
+    { id: 'opencode-go', label: 'OpenCode Go', needsKey: true, hint: 'opencode.ai/zen/go — OpenAI-compatible chat. Key read from OPENCODE_GO_API_KEY.' },
+    { id: 'openai-compatible', label: 'OpenAI-compatible', needsKey: true, hint: 'Any /chat/completions endpoint: OpenAI, Groq, OpenRouter, vLLM, LM Studio.' },
+    { id: 'anthropic', label: 'Anthropic', needsKey: true, hint: 'Claude via the Messages API.' },
+    { id: 'ollama', label: 'Ollama (local)', needsKey: false, hint: 'A model running on this machine. No key required.' },
+  ];
 }
