@@ -103,10 +103,18 @@ export async function startServer(root: string, opts: ServerOptions = {}): Promi
   const port = opts.port ?? 4317;
   const host = opts.host ?? '127.0.0.1';
 
+  // Responses that are still open when shutdown starts. An SSE stream never ends on its
+  // own, so `server.close()` would wait for it forever: the listener closes, the process
+  // never exits, and a killed app leaves an engine behind holding the port.
+  const openResponses = new Set<ServerResponse>();
+
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     const route = url.pathname;
     const method = req.method ?? 'GET';
+
+    openResponses.add(res);
+    res.on('close', () => openResponses.delete(res));
 
     try {
       if (method === 'OPTIONS') {
@@ -136,8 +144,27 @@ export async function startServer(root: string, opts: ServerOptions = {}): Promi
     events,
     close: () =>
       new Promise<void>((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          resolve();
+        };
+        // Shutdown must not depend on clients cooperating: end the streams we know about,
+        // then close the listener and drop whatever is still connected. The timer is the
+        // backstop — a shutdown that cannot finish is worse than an abrupt one.
+        for (const res of openResponses) {
+          try {
+            res.end();
+          } catch {
+            /* already gone */
+          }
+        }
+        openResponses.clear();
         state.svc.close();
-        server.close(() => resolve());
+        server.close(() => finish());
+        server.closeAllConnections?.();
+        setTimeout(finish, 1000).unref();
       }),
   };
 }
