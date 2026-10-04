@@ -10,7 +10,7 @@
  *   syscode serve <dir>      HTTP API + the interface on :4317
  */
 import path from 'node:path';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { isSea } from 'node:sea';
 import { MapService } from './map/service.ts';
 import { analyzeRepo } from './analyze/index.ts';
@@ -123,6 +123,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  // A first map has nothing to have changed *from*: reporting "no changes since the
+  // last map" on a project that had no map tells the developer nothing happened when in
+  // fact everything was just created. MapService.open() refreshes, so the store is
+  // already populated by the time we could ask it — look for the map file itself.
+  const firstMap = !existsSync(path.join(path.resolve(root), '.syscode', 'syscode.db'));
   const svc = await MapService.open(root, { refresh: Boolean(flags.refresh) });
 
   if (cmd === 'map') {
@@ -136,6 +141,9 @@ async function main(): Promise<void> {
       console.log('  changes detected');
       for (const c of report.changes) console.log(`    • ${c.summary}`);
       console.log(`\n  ${report.proposalsCreated} proposal(s) queued — review them in the interface, nothing is applied without approval.\n`);
+    } else if (firstMap) {
+      console.log('  first map built from the code. It is a starting point, not a verdict —');
+      console.log('  connect a model to name and explain it, or edit it by hand.\n');
     } else {
       console.log('  no changes since the last map — nodes keep their identity, positions and notes.\n');
     }
