@@ -565,14 +565,17 @@ select {
 .react-flow {
   background: var(--bg-0);
 }
-/* The whole map is one CSS-transformed layer. Without a hint, WebKitGTK re-rasterizes that
-   layer whenever anything inside it repaints (a selection, a hover) and the fresh raster does
-   not always carry the current scale — the text and every node go soft until the next repaint
-   puts it right. Keeping it a stable composited layer makes the raster survive the repaint. */
+/* The map is drawn inside one CSS-transformed layer at a fractional scale. WebKitGTK will
+   happily cache that layer's raster and, on zoom, scale the cached image up instead of
+   drawing the text again — which is why zooming in looked like an upscaled picture. Asking
+   for a composited layer up front (will-change/backface-visibility) makes that caching
+   certain, so promotion is granted only while a pan or zoom is actually in flight, and
+   dropped when it ends so the canvas is drawn fresh at the final scale. */
 .react-flow__viewport {
-  will-change: transform;
   transform-origin: 0 0;
-  backface-visibility: hidden;
+}
+.react-flow--moving .react-flow__viewport {
+  will-change: transform;
 }
 .react-flow__attribution {
   display: none;

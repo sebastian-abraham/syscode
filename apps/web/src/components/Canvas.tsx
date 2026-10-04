@@ -115,6 +115,9 @@ function Flow() {
   const { fitView, setViewport } = useReactFlow();
   const lastFitRef = useRef<string>('__none__');
   const [pending, setPending] = useState<{ source: string; target: string } | null>(null);
+  // True while a pan/zoom gesture is in flight — the only time the canvas is granted a
+  // compositing hint (see the .react-flow--moving rule in styles.css).
+  const [moving, setMoving] = useState(false);
   const [pendingLabel, setPendingLabel] = useState('');
   const [pendingKind, setPendingKind] = useState<EdgeKind>('depends');
 
@@ -247,6 +250,7 @@ function Flow() {
   return (
     <>
       <ReactFlow
+        className={moving ? 'react-flow--moving' : undefined}
         nodes={nodes}
         edges={edges}
         onNodesChange={onNodesChange}
@@ -259,9 +263,13 @@ function Flow() {
         // When the gesture ends, settle the canvas on whole pixels. The whole map is drawn
         // inside one scaled layer, so a fractional translation makes every repaint resample
         // the text — this is what keeps it from going soft after an interaction.
+        onMoveStart={() => setMoving(true)}
         onMoveEnd={(_e, viewport) => {
           const x = Math.round(viewport.x);
           const y = Math.round(viewport.y);
+          // Dropping the compositing hint is deliberate: it makes WebKit draw the canvas
+          // again at the final scale instead of reusing a raster from the previous zoom.
+          setMoving(false);
           if (x !== viewport.x || y !== viewport.y) void setViewport({ x, y, zoom: viewport.zoom });
         }}
         onConnect={onConnect}

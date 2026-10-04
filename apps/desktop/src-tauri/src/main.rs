@@ -352,7 +352,10 @@ mod fps {
     #[link(name = "webkit2gtk-4.1")]
     extern "C" {
         fn webkit_settings_get_all_features() -> *mut c_void;
-        fn webkit_feature_list_get_length(list: *mut c_void) -> u32;
+        // gsize, not u32: it is size_t (64-bit here). Reading only the low half of the
+        // return value happens to work for small lists, which is exactly the kind of thing
+        // that stops working on a bigger list.
+        fn webkit_feature_list_get_length(list: *mut c_void) -> usize;
         fn webkit_feature_list_get(list: *mut c_void, index: u32) -> *mut c_void;
         fn webkit_feature_get_identifier(feature: *mut c_void) -> *const std::os::raw::c_char;
         fn webkit_settings_set_feature_enabled(
@@ -380,7 +383,7 @@ mod fps {
             }
             let count = webkit_feature_list_get_length(list);
             for index in 0..count {
-                let feature = webkit_feature_list_get(list, index);
+                let feature = webkit_feature_list_get(list, index as u32);
                 if feature.is_null() {
                     continue;
                 }
@@ -596,7 +599,31 @@ fn probe_script(port: u16) -> String {
     }}
     requestAnimationFrame(tick);
   }}
-  function begin() {{ setTimeout(function() {{ openProject(measure); }}, WARMUP_MS); }}
+  function begin() {{ setTimeout(function() {{
+    openProject(function() {{
+      // Hold mode: set the view up (optionally zoomed in) and leave the window alone, so a
+      // screenshot can be taken of the real renderer instead of a guess about it.
+      if (window.__SYSCODE_FPS_HOLD__) {{
+        var zi = document.querySelector('.react-flow__controls-zoomin');
+        var zo = document.querySelector('.react-flow__controls-zoomout');
+        var n = window.__SYSCODE_FPS_ZOOM__ || 0;
+        if (n < 0) {{
+          // Keep zooming in and out forever: a settled screenshot cannot show a raster
+          // that is only stale between two interactions.
+          var up = true;
+          setInterval(function() {{
+            var b = up ? zi : zo;
+            if (b) b.click();
+            up = !up;
+          }}, 700);
+          return;
+        }}
+        for (var i = 0; i < n && zi; i++) zi.click();
+        return;
+      }}
+      measure();
+    }});
+  }}, WARMUP_MS); }}
   if (document.readyState === 'complete') begin();
   else window.addEventListener('load', begin, {{ once: true }});
 }})();"#
@@ -638,8 +665,10 @@ fn main() {
                 Err(err) => eprintln!("[syscode] engine unavailable: {err}"),
             }
             let init = format!(
-                "window.__SYSCODE_API_BASE__ = 'http://127.0.0.1:{port}'; window.__SYSCODE_DESKTOP__ = true; window.__SYSCODE_FPS_INTERACT__ = {};",
-                std::env::var("SYSCODE_FPS_INTERACT").is_ok()
+                "window.__SYSCODE_API_BASE__ = 'http://127.0.0.1:{port}'; window.__SYSCODE_DESKTOP__ = true; window.__SYSCODE_FPS_INTERACT__ = {}; window.__SYSCODE_FPS_HOLD__ = {}; window.__SYSCODE_FPS_ZOOM__ = {};",
+                std::env::var("SYSCODE_FPS_INTERACT").is_ok(),
+                std::env::var("SYSCODE_FPS_HOLD").is_ok(),
+                std::env::var("SYSCODE_FPS_ZOOM").ok().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0)
             );
 
             // If the engine is up, load the interface *from* it: same origin, so the API
