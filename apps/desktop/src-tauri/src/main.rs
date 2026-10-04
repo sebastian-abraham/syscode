@@ -12,7 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 const DEFAULT_PORT: u16 = 4317;
 /// Where the `SYSCODE_FPS_PROBE` harness writes its measurement.
@@ -28,67 +28,138 @@ fn port_open(port: u16) -> bool {
     }
 }
 
-fn repo_root() -> PathBuf {
-    if let Ok(dir) = std::env::var("SYSCODE_REPO") {
-        return PathBuf::from(dir);
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        if cwd.join("packages/core/src/cli.ts").exists() {
-            return cwd;
-        }
-    }
-    // apps/desktop/src-tauri → repo root
-    let mut dir = std::env::current_exe().unwrap_or_default();
-    for _ in 0..5 {
-        dir.pop();
-        if dir.join("packages/core/src/cli.ts").exists() {
-            return dir;
-        }
-    }
-    PathBuf::from(".")
+/// How the shell reaches an engine.
+enum Engine {
+    /// A standalone engine executable (the packaged app ships one).
+    Bundled(PathBuf),
+    /// A source checkout driven by the system's node.
+    NodeScript(PathBuf),
 }
 
-fn engine_script() -> Option<PathBuf> {
+/// Walk up from a starting directory looking for a SysCode source checkout.
+fn find_repo_root_from(start: &std::path::Path) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
+    for _ in 0..12 {
+        if dir.join("packages/core/src/cli.ts").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
+fn repo_root() -> PathBuf {
+    if let Ok(dir) = std::env::var("SYSCODE_REPO") {
+        let p = PathBuf::from(dir);
+        if p.join("packages/core/src/cli.ts").exists() {
+            return p;
+        }
+    }
+    // A source checkout can be found from either the working directory (running from a
+    // terminal) or the executable's location (launched from a file manager, where the
+    // working directory is the home folder or /). The executable path needs more levels
+    // than the old fixed depth allowed: target/release/ sits six below the repo root.
+    let mut starts: Vec<PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        starts.push(cwd);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            starts.push(dir.to_path_buf());
+        }
+    }
+    for start in starts {
+        if let Some(root) = find_repo_root_from(&start) {
+            return root;
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Locate an engine: an explicit override, a bundled one beside the executable, or a
+/// source checkout driven by node.
+fn find_engine() -> Option<Engine> {
     if let Ok(path) = std::env::var("SYSCODE_ENGINE") {
         let p = PathBuf::from(path);
         if p.exists() {
-            return Some(p);
+            return Some(Engine::Bundled(p));
         }
     }
-    let candidate = repo_root().join("packages/core/src/cli.ts");
-    candidate.exists().then_some(candidate)
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // Packaged layouts: next to the binary, or in a resources folder.
+            for rel in ["syscode-engine", "engine/syscode-engine", "../Resources/syscode-engine", "../resources/engine/syscode-engine"] {
+                let candidate = dir.join(rel);
+                if candidate.exists() {
+                    return Some(Engine::Bundled(candidate));
+                }
+            }
+        }
+    }
+
+    let script = repo_root().join("packages/core/src/cli.ts");
+    if script.exists() {
+        return Some(Engine::NodeScript(script));
+    }
+    None
 }
 
-fn spawn_engine(project: &str, port: u16) -> Result<String, String> {
+fn spawn_engine(project: &str, port: u16) -> Result<(String, Option<Child>), String> {
     if port_open(port) {
-        return Ok(format!("engine already listening on {port}"));
+        return Ok((format!("engine already listening on {port}"), None));
     }
-    let script = engine_script().ok_or_else(|| {
-        "could not find the SysCode engine (packages/core/src/cli.ts). Set SYSCODE_ENGINE or SYSCODE_REPO, or start it yourself with `npm run serve`.".to_string()
+    let engine = find_engine().ok_or_else(|| {
+        "no SysCode engine found. Set SYSCODE_ENGINE to a standalone engine, SYSCODE_REPO to a \
+         checkout, or start one with `npm run serve`."
+            .to_string()
     })?;
+
     let log = std::env::temp_dir().join("syscode-engine.log");
     let out = std::fs::File::create(&log).map_err(|e| e.to_string())?;
     let err = out.try_clone().map_err(|e| e.to_string())?;
-    Command::new("node")
-        .arg(&script)
-        .arg("serve")
-        .arg(project)
-        .arg("--port")
-        .arg(port.to_string())
+
+    let mut command = match &engine {
+        Engine::Bundled(path) => {
+            let mut c = Command::new(path);
+            c.arg("serve")
+                .arg(project)
+                .arg("--port")
+                .arg(port.to_string());
+            c
+        }
+        Engine::NodeScript(script) => {
+            let mut c = Command::new("node");
+            c.arg(script)
+                .arg("serve")
+                .arg(project)
+                .arg("--port")
+                .arg(port.to_string());
+            c
+        }
+    };
+
+    let child = command
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err))
         .spawn()
-        .map_err(|e| format!("could not start node: {e}"))?;
+        .map_err(|e| format!("could not start the engine: {e}"))?;
 
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if port_open(port) {
-            return Ok(format!("engine started on {port}"));
+            let how = match &engine {
+                Engine::Bundled(_) => "bundled engine",
+                Engine::NodeScript(_) => "engine from the source checkout",
+            };
+            return Ok((format!("started the {how} on {port}"), Some(child)));
         }
         std::thread::sleep(Duration::from_millis(250));
     }
     Err(format!(
-        "engine did not come up on {port}; see {}",
+        "the engine did not come up on {port}; see {}",
         log.display()
     ))
 }
@@ -96,24 +167,43 @@ fn spawn_engine(project: &str, port: u16) -> Result<String, String> {
 #[tauri::command]
 fn engine_status(port: Option<u16>) -> serde_json::Value {
     let p = port.unwrap_or(DEFAULT_PORT);
+    let engine = find_engine();
+    let (kind, path) = match &engine {
+        Some(Engine::Bundled(path)) => ("bundled", Some(path.display().to_string())),
+        Some(Engine::NodeScript(path)) => ("node", Some(path.display().to_string())),
+        None => ("none", None),
+    };
     serde_json::json!({
         "running": port_open(p),
         "url": format!("http://127.0.0.1:{p}"),
         "repo": repo_root().display().to_string(),
-        "engineScript": engine_script().map(|p| p.display().to_string()),
+        "engineKind": kind,
+        "enginePath": path,
     })
 }
 
+/// Start the engine on demand — the interface calls this from its waiting state, so a
+/// failed start is something the developer can retry and read the reason for, instead of
+/// a window pointed at a port nobody is listening on.
+///
+/// `project` may be omitted: the shell falls back to the project it was launched for.
 #[tauri::command]
-fn start_engine(
+async fn start_engine(
     state: tauri::State<'_, EngineProcess>,
-    project: String,
+    project: Option<String>,
     port: Option<u16>,
 ) -> Result<String, String> {
     let p = port.unwrap_or(DEFAULT_PORT);
-    let message = spawn_engine(&project, p)?;
+    let target = project
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("SYSCODE_PROJECT").ok())
+        .unwrap_or_else(|| repo_root().display().to_string());
+    let (message, child) = spawn_engine(&target, p)?;
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-    *guard = None; // the child is detached on purpose: it outlives a window reload
+    if let Some(mut previous) = guard.take() {
+        let _ = previous.kill();
+    }
+    *guard = child;
     Ok(message)
 }
 
@@ -362,7 +452,7 @@ fn main() {
     let project =
         std::env::var("SYSCODE_PROJECT").unwrap_or_else(|_| repo_root().display().to_string());
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(EngineProcess(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
@@ -373,8 +463,17 @@ fn main() {
         ])
         .setup(move |app| {
             let spawn_result = spawn_engine(&project, port);
-            match &spawn_result {
-                Ok(msg) => println!("[syscode] {msg}"),
+            match spawn_result {
+                Ok((msg, child)) => {
+                    println!("[syscode] {msg}");
+                    // Hold the child so closing the window takes the engine down with it
+                    // instead of leaving a process holding the port.
+                    if let Some(state) = app.try_state::<EngineProcess>() {
+                        if let Ok(mut guard) = state.0.lock() {
+                            *guard = child;
+                        }
+                    }
+                }
                 Err(err) => eprintln!("[syscode] engine unavailable: {err}"),
             }
             let init = format!(
@@ -455,6 +554,19 @@ fn main() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running the SysCode desktop shell");
+        .build(tauri::generate_context!())
+        .expect("error while building the SysCode desktop shell");
+
+    // Take the engine down with the window rather than leaving a process holding the port.
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            if let Some(state) = app_handle.try_state::<EngineProcess>() {
+                if let Ok(mut guard) = state.0.lock() {
+                    if let Some(mut child) = guard.take() {
+                        let _ = child.kill();
+                    }
+                }
+            }
+        }
+    });
 }

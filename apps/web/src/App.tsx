@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { StoreProvider, useStore } from './store.tsx';
 import HeaderBar from './components/HeaderBar.tsx';
 import Canvas from './components/Canvas.tsx';
@@ -112,7 +112,50 @@ function Splash() {
   );
 }
 
+/// In the desktop shell the app can start the engine itself, so a failed start is
+/// recoverable here: it reports what went wrong, and on success moves the window onto
+/// the engine's own origin (which is what makes the API calls same-origin).
+function DesktopStartEngine({ onStarted }: { onStarted: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const desktop = Boolean((window as unknown as { __SYSCODE_DESKTOP__?: boolean }).__SYSCODE_DESKTOP__);
+  const invoke = (window as unknown as { __TAURI__?: { core?: { invoke?: Function } } }).__TAURI__
+    ?.core?.invoke;
+  if (!desktop || !invoke) return null;
+
+  const start = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const message = await invoke('start_engine', { project: null, port: null });
+      setNote(String(message));
+      // Move onto the engine's own origin: the embedded page lives on tauri://localhost,
+      // which the engine's API does not answer cross-origin.
+      const base = (window as unknown as { __SYSCODE_API_BASE__?: string }).__SYSCODE_API_BASE__;
+      if (base) {
+        window.location.replace(base);
+        return;
+      }
+      onStarted();
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="splash__desktop">
+      <button type="button" className="btn btn--primary" onClick={() => void start()} disabled={busy}>
+        {busy ? 'Starting the engine…' : 'Start the engine'}
+      </button>
+      {note ? <div className="splash__note">{note}</div> : null}
+    </div>
+  );
+}
+
 function Waiting({ message, onRetry }: { message: string | null; onRetry: () => void }) {
+  const desktop = Boolean((window as unknown as { __SYSCODE_DESKTOP__?: boolean }).__SYSCODE_DESKTOP__);
   return (
     <div className="splash">
       <div className="splash__inner">
@@ -123,10 +166,17 @@ function Waiting({ message, onRetry }: { message: string | null; onRetry: () => 
         <div className="splash__title">Waiting for the SysCode engine on :4317</div>
         <div className="splash__text">
           {message ? <>{message}. </> : null}
-          Start the engine in your project directory, then retry:
-          <br />
-          <span className="splash__code">npm run serve</span>
+          {desktop ? (
+            <>The engine was not reachable, but this app can start one.</>
+          ) : (
+            <>
+              Start the engine in your project directory, then retry:
+              <br />
+              <span className="splash__code">npm run serve</span>
+            </>
+          )}
         </div>
+        <DesktopStartEngine onStarted={onRetry} />
         <button type="button" className="btn btn--primary" onClick={onRetry}>
           Retry connection
         </button>

@@ -1472,6 +1472,23 @@ select {
   border-radius: var(--r-sm);
   padding: 2px 7px;
 }
+.splash__desktop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.splash__note {
+  max-width: 380px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-3);
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+}
 
 .canvas-empty {
   position: absolute;
