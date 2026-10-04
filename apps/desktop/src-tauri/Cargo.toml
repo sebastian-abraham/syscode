@@ -13,6 +13,12 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Linux only: needed to reach the platform WebKitGTK WebView (via Tauri's
+# `with_webview`) and turn off the WebKit "PreferPageRenderingUpdatesNear60FPS"
+# feature so page rendering is not clamped to ~60fps on high-refresh displays.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "2.0"
+
 [features]
 default = []
 

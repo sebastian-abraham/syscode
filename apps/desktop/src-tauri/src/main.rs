@@ -5,7 +5,8 @@
 // webview at it, and gets out of the way. If no engine can be started it says so
 // instead of pretending — the window still opens and shows the retry state.
 
-use std::net::TcpStream;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -14,6 +15,8 @@ use std::time::{Duration, Instant};
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 
 const DEFAULT_PORT: u16 = 4317;
+/// Where the `SYSCODE_FPS_PROBE` harness writes its measurement.
+const FPS_PROBE_FILE: &str = "/tmp/syscode-fps.json";
 
 struct EngineProcess(Mutex<Option<Child>>);
 
@@ -124,6 +127,217 @@ fn stop_engine(state: tauri::State<'_, EngineProcess>) -> Result<String, String>
     Ok("no engine started by this window".into())
 }
 
+/// Unlock high-refresh rendering.
+///
+/// WebKitGTK keeps an internal feature named `PreferPageRenderingUpdatesNear60FPS`
+/// (identifier `PreferPageRenderingUpdatesNear60FPS`, status STABLE, **default
+/// enabled**) that clamps page rendering updates to roughly 60fps regardless of
+/// the display refresh rate. It is the same knob the macOS
+/// `tauri-plugin-macos-fps` flips to unlock ProMotion; on GTK it is still on, so
+/// a 120Hz panel gets ~60fps. WebKitGTK 2.42+ exposes features through
+/// `webkit_settings_get_all_features()` / `webkit_settings_set_feature_enabled()`,
+/// which the `webkit2gtk` Rust crate (2.0.x) does not bind yet, so we call the C
+/// API directly. The symbols live in the `webkit2gtk-4.1` library the crate
+/// already links.
+#[cfg(target_os = "linux")]
+mod fps {
+    use std::ffi::c_void;
+    use webkit2gtk::glib::translate::ToGlibPtr;
+    use webkit2gtk::WebViewExt;
+
+    #[link(name = "webkit2gtk-4.1")]
+    extern "C" {
+        fn webkit_settings_get_all_features() -> *mut c_void;
+        fn webkit_feature_list_get_length(list: *mut c_void) -> u32;
+        fn webkit_feature_list_get(list: *mut c_void, index: u32) -> *mut c_void;
+        fn webkit_feature_get_identifier(feature: *mut c_void) -> *const std::os::raw::c_char;
+        fn webkit_settings_set_feature_enabled(
+            settings: *mut c_void,
+            feature: *mut c_void,
+            enabled: i32,
+        );
+        fn webkit_feature_list_unref(list: *mut c_void);
+    }
+
+    /// Disable `PreferPageRenderingUpdatesNear60FPS` on the live WebView settings.
+    /// Returns `true` if the feature was found and switched off.
+    pub fn disable_60fps_cap(webview: &webkit2gtk::WebView) -> bool {
+        let settings = match webview.settings() {
+            Some(s) => s,
+            None => return false,
+        };
+        let raw_settings: *mut webkit2gtk::ffi::WebKitSettings = settings.to_glib_none().0;
+        let raw_settings = raw_settings as *mut c_void;
+        let mut disabled = false;
+        unsafe {
+            let list = webkit_settings_get_all_features();
+            if list.is_null() {
+                return false;
+            }
+            let count = webkit_feature_list_get_length(list);
+            for index in 0..count {
+                let feature = webkit_feature_list_get(list, index);
+                if feature.is_null() {
+                    continue;
+                }
+                let identifier = webkit_feature_get_identifier(feature);
+                if identifier.is_null() {
+                    continue;
+                }
+                if std::ffi::CStr::from_ptr(identifier).to_string_lossy()
+                    == "PreferPageRenderingUpdatesNear60FPS"
+                {
+                    webkit_settings_set_feature_enabled(raw_settings, feature, 0);
+                    disabled = true;
+                    break;
+                }
+            }
+            webkit_feature_list_unref(list);
+        }
+        disabled
+    }
+}
+
+/// First index of `needle` in `haystack` (used to find the HTTP header terminator).
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Parse `Content-Length` from a raw HTTP header block.
+fn header_content_length(headers: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(headers);
+    for line in text.lines() {
+        if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            return rest.trim().parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
+/// One-shot HTTP listener used only by the FPS harness. The injected page script
+/// POSTs its measured result here (a cross-origin `no-cors` POST is a CORS-simple
+/// request, so it is delivered without a preflight), we persist it to
+/// `FPS_PROBE_FILE` and print it, then exit so an automated run terminates.
+fn start_probe_listener(app: tauri::AppHandle) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fps probe listener");
+    let port = listener.local_addr().expect("fps probe addr").port();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            let (mut stream, _) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let mut buf: Vec<u8> = Vec::new();
+            let mut header_end: Option<usize> = None;
+            let mut content_length: usize = 0;
+            loop {
+                let mut chunk = [0u8; 4096];
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        buf.extend_from_slice(&chunk[..read]);
+                        if header_end.is_none() {
+                            if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                                header_end = Some(pos + 4);
+                                content_length = header_content_length(&buf[..pos + 4]);
+                            }
+                        }
+                        if let Some(end) = header_end {
+                            if buf.len() >= end + content_length {
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let request = String::from_utf8_lossy(&buf).to_string();
+            let body = match header_end {
+                Some(end) => {
+                    let stop = (end + content_length).min(buf.len());
+                    String::from_utf8_lossy(&buf[end..stop]).trim().to_string()
+                }
+                None => String::new(),
+            };
+            let request_line = request.lines().next().unwrap_or("").to_string();
+            println!(
+                "[syscode][fps] probe connection: {} bytes, {} bytes body ({request_line:?})",
+                buf.len(),
+                body.len()
+            );
+            let _ = stream.write_all(
+                b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            let _ = stream.flush();
+            if !body.is_empty() {
+                if body.contains("\"href\":\"about") {
+                    println!("[syscode][fps] ignoring blank-document report: {body}");
+                    continue;
+                }
+                let _ = std::fs::write(FPS_PROBE_FILE, &body);
+                println!("[syscode][fps] {body}");
+                println!("[syscode][fps] wrote {FPS_PROBE_FILE}");
+                std::thread::sleep(Duration::from_millis(200));
+                // Quit through the event loop (main thread) rather than std::process::exit
+                // from this thread, so GTK/WebKit tear down cleanly.
+                app.exit(0);
+            }
+        }
+        eprintln!("[syscode][fps] probe listener timed out with no report");
+    });
+    port
+}
+
+/// Injected into the page by the harness: after load + a short warm-up, count
+/// `requestAnimationFrame` callbacks for ~3s and report the rate to the listener.
+fn probe_script(port: u16) -> String {
+    format!(
+        r#"(function(){{
+  if (location.protocol === 'about:') return; // initial blank document; wait for the real page
+  if (window.__SYSCODE_FPS_PROBE__) return;
+  window.__SYSCODE_FPS_PROBE__ = true;
+  var PORT = {port};
+  var WARMUP_MS = 500, MEASURE_MS = 3000;
+  function report(payload) {{
+    try {{
+      fetch('http://127.0.0.1:' + PORT + '/fps', {{
+        method: 'POST',
+        mode: 'no-cors',
+        headers: {{ 'Content-Type': 'text/plain' }},
+        body: JSON.stringify(payload)
+      }}).catch(function(){{}});
+    }} catch (e) {{}}
+  }}
+  function measure() {{
+    var start = performance.now(), frames = 0;
+    function tick() {{
+      frames++;
+      var now = performance.now();
+      if (now - start >= MEASURE_MS) {{
+        var ms = now - start;
+        report({{
+          fps: Math.round((frames * 1000 / ms) * 100) / 100,
+          frames: frames,
+          ms: Math.round(ms * 100) / 100,
+          href: location.href
+        }});
+        return;
+      }}
+      requestAnimationFrame(tick);
+    }}
+    requestAnimationFrame(tick);
+  }}
+  function begin() {{ setTimeout(measure, WARMUP_MS); }}
+  if (document.readyState === 'complete') begin();
+  else window.addEventListener('load', begin, {{ once: true }});
+}})();"#
+    )
+}
+
 fn main() {
     let port: u16 = std::env::var("SYSCODE_PORT")
         .ok()
@@ -165,7 +379,58 @@ fn main() {
                 .theme(Some(tauri::Theme::Dark))
                 .initialization_script(&init)
                 .build()?;
+
+            // Applied as early as the webview exists, so it governs the first paint.
+            // Set SYSCODE_FPS_FIX=0 to measure the un-patched (60fps-capped) behaviour.
+            let fix_enabled = std::env::var("SYSCODE_FPS_FIX")
+                .map(|v| v != "0")
+                .unwrap_or(true);
+            if fix_enabled {
+                let _ = window.with_webview(|webview| {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let disabled = fps::disable_60fps_cap(&webview.inner());
+                        println!(
+                            "[syscode][fps] PreferPageRenderingUpdatesNear60FPS disabled = {disabled}"
+                        );
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = &webview;
+                });
+            }
+
             let _ = window.set_focus();
+
+            // Objective FPS harness: inert unless SYSCODE_FPS_PROBE is set.
+            if std::env::var("SYSCODE_FPS_PROBE").is_ok() {
+                let probe_port = start_probe_listener(app.handle().clone());
+                // Keep the window mapped, on screen and focused so WebKit does not
+                // throttle rendering because it believes the window is hidden.
+                let _ = window.set_always_on_top(true);
+                let _ = window.show();
+                let _ = window.set_focus();
+                println!("[syscode][fps] probe armed on 127.0.0.1:{probe_port}");
+                let probe_window = window.clone();
+                std::thread::spawn(move || {
+                    // Re-inject until the real interface (the engine URL) is the live
+                    // document and the probe reports; the in-page guard makes repeats
+                    // harmless. The listener exits the process on success.
+                    let deadline = Instant::now() + Duration::from_secs(40);
+                    let mut announced = false;
+                    while Instant::now() < deadline {
+                        let url = probe_window.url().map(|u| u.to_string()).unwrap_or_default();
+                        if url.contains("127.0.0.1") {
+                            if !announced {
+                                println!("[syscode][fps] evaluating probe (url={url:?})");
+                                announced = true;
+                            }
+                            let _ = probe_window.eval(&probe_script(probe_port));
+                        }
+                        std::thread::sleep(Duration::from_millis(1200));
+                    }
+                    eprintln!("[syscode][fps] probe window loop ended without a report");
+                });
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
