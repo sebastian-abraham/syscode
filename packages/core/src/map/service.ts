@@ -5,15 +5,18 @@
 import path from 'node:path';
 import { readFileSync } from 'node:fs';
 import type {
-  Anchor, ChatMessage, DetectedChange, JournalEntry, MapEdge, MapNode, MapOp, Note, ProjectInfo,
-  Proposal, RefreshReport, RepoFacts, ScopedContext, SyscodeConfig,
+  Anchor, ChatMessage, DetectedChange, JournalEntry, MapEdge, MapNode, MapOp, MemoryInfo, Note, ProjectInfo,
+  Proposal, RefineResult, RefreshReport, RepoFacts, ScopedContext, SyscodeConfig,
 } from '../types.ts';
 import { analyzeRepo } from '../analyze/index.ts';
+import { serviceLabel } from '../analyze/external.ts';
 import { newId, Store, type StoredNode } from '../store/db.ts';
 import { proposeMap, type ProposedMap, type ProposedNode } from './heuristic.ts';
 import { applyReconcile, makeNode, reconcile } from './identity.ts';
 import { brainInfo, loadConfig, resolveBrain, saveConfig, type Brain } from '../config.ts';
 import { buildContext, estimateTokens } from '../memory/context.ts';
+import { buildProjectMemory } from '../memory/mapping.ts';
+import { suggestRefinements, type RefineTarget } from '../llm/refine.ts';
 
 export interface CodePeek {
   path: string;
@@ -516,6 +519,123 @@ export class MapService {
     this.brain = resolveBrain(next);
     this.store.setJson('project.brain', brainInfo(this.brain));
     return next;
+  }
+
+  /* ------------------------------------------------------- agent-owned meaning */
+
+  /**
+   * Ask a model to re-name and re-explain part of the map. The facts that justify each
+   * node are handed over with it, and the result comes back as a proposal — the map only
+   * changes if the developer accepts it.
+   */
+  async refine(opts: { nodeId?: string | null; signal?: AbortSignal } = {}): Promise<RefineResult> {
+    const all = this.store.allNodes();
+    const scope = opts.nodeId ? all.find((n) => n.id === opts.nodeId) : undefined;
+    const targets = scope
+      ? [scope, ...all.filter((n) => n.parentId === scope.id)]
+      : all.filter((n) => n.level === 0);
+
+    const labelById = new Map(all.map((n) => [n.id, n.label]));
+    const edges = this.store.allEdges();
+    const factsByPath = new Map(this.facts.files.map((f) => [f.path, f]));
+
+    const refineTargets: RefineTarget[] = targets.map((n) => {
+      const deps = edges.filter((e) => e.source === n.id).map((e) => labelById.get(e.target) ?? '');
+      const usedBy = edges.filter((e) => e.target === n.id).map((e) => labelById.get(e.source) ?? '');
+      const exports: string[] = [];
+      const services = new Set<string>();
+      const entryFiles: string[] = [];
+      for (const file of n.files) {
+        const f = factsByPath.get(file);
+        if (!f) continue;
+        exports.push(...f.exports.slice(0, 4));
+        if (f.isEntry) entryFiles.push(f.path);
+        for (const imp of f.imports) {
+          if (imp.external && imp.package) {
+            const svc = serviceLabel(imp.package);
+            if (svc) services.add(svc);
+          }
+        }
+      }
+      return {
+        key: n.key,
+        id: n.id,
+        label: n.label,
+        kind: n.kind,
+        level: n.level,
+        summary: n.summary,
+        files: n.files,
+        exports: [...new Set(exports)],
+        dependsOn: [...new Set(deps)].filter(Boolean),
+        usedBy: [...new Set(usedBy)].filter(Boolean),
+        entryFiles,
+        services: [...services],
+        children: all.filter((c) => c.parentId === n.id).map((c) => c.label),
+        labelLocked: n.labelLocked,
+      };
+    });
+
+    const outcome = await suggestRefinements(this.brain, this.facts, refineTargets, { signal: opts.signal });
+    const brain = brainInfo(this.brain);
+    if (outcome.error) return { proposal: null, nodesTouched: 0, brain, skipped: outcome.error, raw: outcome.raw };
+
+    const byKey = new Map(refineTargets.map((t) => [t.key, t]));
+    const ops: MapOp[] = [];
+    const notes: string[] = [];
+    for (const s of outcome.suggestions) {
+      const target = byKey.get(s.key);
+      if (!target) continue;
+      if (s.label) ops.push({ op: 'rename-node', nodeId: target.id, label: s.label });
+      if (s.summary) ops.push({ op: 'update-summary', nodeId: target.id, summary: s.summary });
+      if (s.note) notes.push(`**${s.label ?? target.label}**: ${s.note}`);
+    }
+    if (!ops.length) {
+      return {
+        proposal: null,
+        nodesTouched: 0,
+        brain,
+        skipped: notes.length ? `The model had notes but no renames: ${notes.join(' ')}` : 'The model agreed with the current naming.',
+      };
+    }
+
+    const proposal = this.addProposal({
+      title: `Name and explain the map with ${this.brain.model ?? this.brain.provider}`,
+      rationale: [
+        `A model read the facts behind ${refineTargets.length} node${refineTargets.length === 1 ? '' : 's'} and rewrote the naming and explanations it disagreed with.`,
+        'The facts came from the code; the words came from the model. Accepting this changes what the map says, not what the code does.',
+        ...(notes.length ? ['', 'Grouping observations:', ...notes.map((n) => `- ${n}`)] : []),
+      ].join('\n'),
+      ops,
+      origin: 'inferred',
+    });
+    return { proposal, nodesTouched: ops.length, brain };
+  }
+
+  /** What the agent currently knows about this project. */
+  memory(): MemoryInfo {
+    const text = this.store.getMeta('project.memory') ?? '';
+    const origin = (this.store.getMeta('project.memory.origin') as MemoryInfo['origin']) ?? 'facts';
+    return {
+      text,
+      origin,
+      builtAt: this.store.getMeta('project.memory.builtAt'),
+      model: this.store.getMeta('project.memory.model'),
+    };
+  }
+
+  /** Run the mapping pass: read the facts, write memory the agent will reuse. */
+  async buildMemory(opts: { signal?: AbortSignal } = {}): Promise<MemoryInfo> {
+    const areas = this.store
+      .allNodes()
+      .filter((n) => n.level === 0)
+      .map((n) => ({ label: n.label, summary: n.summary, files: n.metrics.files, dirs: [...new Set(n.anchors.filter((a) => a.kind === 'dir').map((a) => a.path))] }));
+    const info = await buildProjectMemory(this.brain, { facts: this.facts, areas }, this.root, opts);
+    this.store.setMeta('project.memory', info.text);
+    this.store.setMeta('project.memory.origin', info.origin);
+    if (info.builtAt) this.store.setMeta('project.memory.builtAt', info.builtAt);
+    if (info.model) this.store.setMeta('project.memory.model', info.model);
+    this.store.log('engine', 'memory-built', info.origin === 'model' ? `Project memory written by ${info.model ?? 'the model'}.` : 'Project memory written from the facts.');
+    return info;
   }
 
   setMemory(text: string): void {

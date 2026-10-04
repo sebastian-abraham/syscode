@@ -8,8 +8,11 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { MapService } from '../map/service.ts';
 import { runChat } from '../llm/agent.ts';
-import { probeBrain } from '../llm/provider.ts';
-import { brainInfo, loadConfig } from '../config.ts';
+import { listModels, probeBrain } from '../llm/provider.ts';
+import { brainInfo, loadConfig, providerCatalogue } from '../config.ts';
+import {
+  WorkspaceError, createProject, defaultParentDir, forgetProject, rememberProject, workspaceInfo,
+} from '../workspace.ts';
 import { newId } from '../store/db.ts';
 import type { ChatEvent, ChatMessage, MapNode, Note } from '../types.ts';
 
@@ -32,6 +35,13 @@ export interface ServerOptions {
   host?: string;
   /** Where the built interface lives. */
   webRoot?: string;
+}
+
+/** The engine can be pointed at a different project while it runs — the app has a life
+ *  outside one repository, so the served map is state, not a closure. */
+interface ServerState {
+  svc: MapService;
+  webRoot: string;
 }
 
 export interface SyscodeServer {
@@ -86,9 +96,10 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
 
 export async function startServer(root: string, opts: ServerOptions = {}): Promise<SyscodeServer> {
   const svc = await MapService.open(root, { refresh: true });
+  rememberProject(svc.root);
   const events = new EventEmitter();
   events.setMaxListeners(50);
-  const webRoot = opts.webRoot ?? resolveWebRoot(root);
+  const state: ServerState = { svc, webRoot: opts.webRoot ?? resolveWebRoot(root) };
   const port = opts.port ?? 4317;
   const host = opts.host ?? '127.0.0.1';
 
@@ -104,10 +115,10 @@ export async function startServer(root: string, opts: ServerOptions = {}): Promi
         return;
       }
       if (route.startsWith('/api/')) {
-        await handleApi(svc, events, route, method, req, res, url.searchParams);
+        await handleApi(state, events, route, method, req, res, url.searchParams);
         return;
       }
-      serveStatic(webRoot, route, res);
+      serveStatic(state.webRoot, route, res);
     } catch (err) {
       json(res, 500, { error: (err as Error).message });
     }
@@ -125,10 +136,30 @@ export async function startServer(root: string, opts: ServerOptions = {}): Promi
     events,
     close: () =>
       new Promise<void>((resolve) => {
-        svc.close();
+        state.svc.close();
         server.close(() => resolve());
       }),
   };
+}
+
+/**
+ * Point the running engine at a different project. The old map is closed cleanly and the
+ * new one is mapped from scratch, so switching projects never mixes their state.
+ */
+async function switchProject(state: ServerState, dir: string): Promise<MapService> {
+  const abs = path.resolve(dir);
+  if (!existsSync(abs)) throw new Error(`No such directory: ${abs}`);
+  if (!statSync(abs).isDirectory()) throw new Error(`${abs} is not a directory.`);
+  const next = await MapService.open(abs, { refresh: true });
+  rememberProject(next.root);
+  const previous = state.svc;
+  state.svc = next;
+  try {
+    previous.close();
+  } catch {
+    /* already closed */
+  }
+  return next;
 }
 
 /**
@@ -146,7 +177,7 @@ function resolveWebRoot(root: string): string {
 }
 
 async function handleApi(
-  svc: MapService,
+  state: ServerState,
   events: EventEmitter,
   route: string,
   method: string,
@@ -154,6 +185,7 @@ async function handleApi(
   res: ServerResponse,
   query: URLSearchParams,
 ): Promise<void> {
+  const svc = state.svc;
   const seg = route.replace(/^\/api\/?/, '').split('/').filter(Boolean);
 
   /* ---------------------------------------------------------------- health */
@@ -205,6 +237,10 @@ async function handleApi(
     return;
   }
   if (seg[0] === 'config') {
+    if (seg[1] === 'models' && method === 'GET') {
+      json(res, 200, { brain: brainInfo(svc.brain), models: await listModels(svc.brain) });
+      return;
+    }
     if (method === 'GET') {
       const cfg = loadConfig(svc.root);
       json(res, 200, { ...cfg, apiKey: cfg.apiKey ? '••••••' : undefined, brain: brainInfo(svc.brain), note: svc.brain.note });
@@ -227,6 +263,79 @@ async function handleApi(
       return;
     }
   }
+  /* ------------------------------------------------------------- workspace */
+  if (seg[0] === 'providers') {
+    json(res, 200, { providers: providerCatalogue(), defaultParentDir: defaultParentDir() });
+    return;
+  }
+  if (seg[0] === 'workspace') {
+    if (method === 'GET') {
+      json(res, 200, workspaceInfo(svc.project()));
+      return;
+    }
+    if (method === 'POST' && seg[1] === 'open') {
+      const body = await readBody(req);
+      const target = String(body.path ?? '').trim();
+      if (!target) {
+        json(res, 400, { error: 'path is required' });
+        return;
+      }
+      try {
+        const next = await switchProject(state, target);
+        events.emit('change', { type: 'project-changed' });
+        json(res, 200, next.project());
+      } catch (err) {
+        json(res, 400, { error: (err as Error).message });
+      }
+      return;
+    }
+    if (method === 'POST' && seg[1] === 'create') {
+      const body = await readBody(req);
+      try {
+        const created = createProject({
+          name: String(body.name ?? ''),
+          parentDir: body.parentDir ? String(body.parentDir) : undefined,
+          template: (body.template as 'empty' | 'typescript' | undefined) ?? undefined,
+        });
+        const next = await switchProject(state, created.path);
+        events.emit('change', { type: 'project-changed' });
+        json(res, 200, { ...next.project(), created: created.files });
+      } catch (err) {
+        json(res, err instanceof WorkspaceError ? 400 : 500, { error: (err as Error).message });
+      }
+      return;
+    }
+    if (method === 'POST' && seg[1] === 'forget') {
+      const body = await readBody(req);
+      forgetProject(String(body.path ?? ''));
+      json(res, 200, workspaceInfo(svc.project()));
+      return;
+    }
+  }
+
+  /* ---------------------------------------------------------------- memory */
+  if (seg[0] === 'memory') {
+    if (method === 'GET') {
+      json(res, 200, svc.memory());
+      return;
+    }
+    if (method === 'POST' && seg[1] === 'build') {
+      const info = await svc.buildMemory();
+      events.emit('change', { type: 'map-changed' });
+      json(res, 200, info);
+      return;
+    }
+  }
+
+  /* ---------------------------------------------------------------- refine */
+  if (seg[0] === 'refine' && method === 'POST') {
+    const body = await readBody(req);
+    const result = await svc.refine({ nodeId: (body.nodeId as string | null | undefined) ?? null });
+    if (result.proposal) events.emit('change', { type: 'proposal-created' });
+    json(res, 200, result);
+    return;
+  }
+
   if (seg[0] === 'events') {
     res.writeHead(200, {
       'content-type': 'text/event-stream',

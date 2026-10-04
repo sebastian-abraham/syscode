@@ -24,12 +24,18 @@ usage:
   syscode analyze <dir>          deterministic facts about the repo
   syscode context <dir> [--node <id>] [--find <text>]
   syscode ask <dir> "<question>" [--node <id>]
+  syscode memory <dir>           run the mapping pass and print what the agent knows
+  syscode refine <dir> [--node <id>] [--apply]
+                                 let the model re-name and re-explain the map
+  syscode probe <dir>            check the configured model actually answers
+  syscode workspace              list the projects opened before
   syscode serve <dir> [--port 4317]
 
 flags:
   --all        show every level, not just the top two
   --json       machine-readable output
-  --refresh    force a re-scan before acting`;
+  --refresh    force a re-scan before acting
+  --apply      accept the proposal instead of just printing it`;
 
 function parseArgs(argv: string[]): { cmd: string; target: string; rest: string[]; flags: Record<string, string | boolean> } {
   const [cmd = 'help', ...tail] = argv;
@@ -173,6 +179,88 @@ async function main(): Promise<void> {
     }
     console.log('\n');
     svc.close();
+    return;
+  }
+
+  if (cmd === 'probe') {
+    const { probeBrain } = await import('./llm/provider.ts');
+    const { listModels } = await import('./llm/provider.ts');
+    const result = await probeBrain(svc.brain);
+    console.log(`\n  brain   ${brainInfo(svc.brain).mode}${svc.brain.model ? ` (${svc.brain.provider}/${svc.brain.model})` : ''}`);
+    if (svc.brain.note) console.log(`  note    ${svc.brain.note}`);
+    console.log(`  probe   ${result.ok ? 'ok' : 'failed'} — ${result.detail}`);
+    const models = await listModels(svc.brain);
+    if (models.length) {
+      const usable = models.filter((m) => m.supported);
+      console.log(`  models  ${models.length} available, ${usable.length} usable by this client`);
+      console.log(`          ${usable.slice(0, 8).map((m) => m.id).join(', ')}`);
+    }
+    console.log('');
+    svc.close();
+    return;
+  }
+
+  if (cmd === 'memory') {
+    const info = await svc.buildMemory();
+    console.log(`\n  project memory — written from ${info.origin}${info.model ? ` (${info.model})` : ''}\n`);
+    console.log(info.text.split('\n').map((l) => `  ${l}`).join('\n'));
+    console.log('');
+    svc.close();
+    return;
+  }
+
+  if (cmd === 'refine') {
+    let nodeId = typeof flags.node === 'string' ? flags.node : null;
+    if (!nodeId && rest.length) {
+      const want = rest.join(' ').toLowerCase();
+      nodeId = svc.store.allNodes().find((n) => n.label.toLowerCase().includes(want))?.id ?? null;
+    }
+    const result = await svc.refine({ nodeId });
+    const brain = brainInfo(svc.brain);
+    console.log(`\n  refine — brain: ${brain.mode}${brain.model ? ` (${brain.model})` : ''}`);
+    if (result.skipped) {
+      console.log(`  nothing proposed: ${result.skipped}\n`);
+      if (flags.raw && result.raw) {
+        console.log('  raw model reply:');
+        console.log(result.raw.split('\n').slice(0, 40).map((l) => `    ${l}`).join('\n'));
+        console.log('');
+      }
+      svc.close();
+      return;
+    }
+    const p = result.proposal!;
+    console.log(`  ${p.title}`);
+    console.log('');
+    for (const line of p.rationale.split('\n')) console.log(`  ${line}`);
+    console.log('');
+    for (const op of p.ops) {
+      if (op.op === 'rename-node') {
+        const n = svc.node(op.nodeId);
+        console.log(`  rename  ${n?.label ?? op.nodeId}  →  ${op.label}`);
+      } else if (op.op === 'update-summary') {
+        const n = svc.node(op.nodeId);
+        console.log(`  explain ${n?.label ?? op.nodeId}: ${op.summary}`);
+      } else {
+        console.log(`  ${op.op}`);
+      }
+    }
+    if (flags.apply) {
+      svc.approveProposal(p.id);
+      console.log(`\n  applied — the map now says this.\n`);
+    } else {
+      console.log(`\n  ${result.nodesTouched} change(s) queued as a proposal. Re-run with --apply to accept.\n`);
+    }
+    svc.close();
+    return;
+  }
+
+  if (cmd === 'workspace') {
+    const { recentProjects, defaultParentDir } = await import('./workspace.ts');
+    const recent = recentProjects();
+    console.log(`\n  recent projects (new ones go in ${defaultParentDir()})\n`);
+    if (!recent.length) console.log('    (none yet)');
+    for (const p of recent) console.log(`    ${p.missing ? '✗' : '·'} ${p.name.padEnd(22)} ${p.path}${p.missing ? '  (missing)' : ''}`);
+    console.log('');
     return;
   }
 
