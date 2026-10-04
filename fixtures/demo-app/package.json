@@ -1,0 +1,33 @@
+{
+  "name": "shopkit",
+  "version": "0.4.0",
+  "private": true,
+  "description": "Storefront backend: catalog, cart, checkout and order fulfillment.",
+  "main": "dist/server/app.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn src/server/app.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server/app.js",
+    "worker": "node dist/notifications/worker.js",
+    "test": "jest"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.11.5",
+    "redis": "^4.6.13",
+    "stripe": "^15.4.0",
+    "zod": "^3.23.4"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/jest": "^29.5.12",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/node": "^20.12.7",
+    "@types/pg": "^8.11.5",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.4.5"
+  }
+}
