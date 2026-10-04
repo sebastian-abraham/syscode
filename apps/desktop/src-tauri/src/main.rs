@@ -136,6 +136,23 @@ fn find_engine() -> Option<Engine> {
     None
 }
 
+/// A source checkout is present, so this is a development run rather than an installed app.
+fn checkout_present() -> bool {
+    if let Ok(cwd) = std::env::current_dir() {
+        if find_repo_root_from(&cwd).is_some() {
+            return true;
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if find_repo_root_from(dir).is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Point the shell at the engine and interface Tauri bundled into the app's resource
 /// directory, when they are actually there.
 ///
@@ -143,9 +160,16 @@ fn find_engine() -> Option<Engine> {
 /// or `/usr/lib/<identifier>`), not next to the binary, so the beside-the-executable
 /// fallbacks in `find_engine()` cannot see it. Exporting `SYSCODE_ENGINE` here lets the
 /// existing override branch pick the bundled engine up, and the engine the shell spawns
-/// inherits `SYSCODE_WEB` for the bundled interface. Explicit overrides win, and in a
-/// dev checkout the resources are absent so nothing changes.
+/// inherits `SYSCODE_WEB` for the bundled interface. Explicit overrides always win.
+///
+/// A checkout wins over the bundled copies. `tauri build` leaves the resources next to the
+/// binary, so their presence is not proof that this is an installed app — and someone
+/// running the release binary from the repository is editing that source, not the engine
+/// frozen into a previous bundle.
 fn configure_bundled_resources(app: &tauri::AppHandle) {
+    if checkout_present() {
+        return;
+    }
     let dir = match app.path().resource_dir() {
         Ok(dir) => dir,
         Err(_) => return,
@@ -194,12 +218,27 @@ fn spawn_engine(project: &str, port: u16) -> Result<(String, Option<Child>), Str
         }
     };
 
+    // The engine must not outlive the app: an abrupt kill (crash, SIGKILL, a terminal
+    // Ctrl-C) never reaches the exit handler that takes the child down, and the leftover
+    // engine keeps holding the port. PR_SET_PDEATHSIG ties it to this process.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
     let child = command
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err))
         .spawn()
         .map_err(|e| format!("could not start the engine: {e}"))?;
-
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if port_open(port) {

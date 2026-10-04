@@ -17,8 +17,10 @@ serde_json = "1"
 # Linux only: needed to reach the platform WebKitGTK WebView (via Tauri's
 # `with_webview`) and turn off the WebKit "PreferPageRenderingUpdatesNear60FPS"
 # feature so page rendering is not clamped to ~60fps on high-refresh displays.
+# `libc` is for PR_SET_PDEATHSIG on the engine child.
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2.0"
+libc = "0.2"
 
 [features]
 default = []
