@@ -20,6 +20,10 @@
     "targets": ["deb", "appimage"],
     "icon": ["icons/icon.png"],
     "category": "DeveloperTool",
-    "shortDescription": "A living design map for agent-built software"
+    "shortDescription": "A living design map for agent-built software",
+    "resources": {
+      "../../../dist/engine/syscode-engine": "engine/syscode-engine",
+      "../../../dist/engine/web": "web"
+    }
   }
 }

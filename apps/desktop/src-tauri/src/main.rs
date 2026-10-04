@@ -78,6 +78,35 @@ fn repo_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// The project the shell opens when nothing more specific is given.
+///
+/// A source checkout is preferred (dev mode is unchanged). A packaged app has no
+/// checkout, and its process working directory is the read-only install directory
+/// (AppRun `chdir`s into the AppImage mount), so pointing the engine there fails when it
+/// tries to create `.syscode`. Fall back to a writable, SysCode-owned workspace; the
+/// start screen opens a real project from there.
+fn default_project() -> PathBuf {
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(root) = find_repo_root_from(&cwd) {
+            return root;
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Some(root) = find_repo_root_from(dir) {
+                return root;
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let workspace = PathBuf::from(home).join(".local/share/syscode/workspace");
+        if std::fs::create_dir_all(&workspace).is_ok() {
+            return workspace;
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
 /// Locate an engine: an explicit override, a bundled one beside the executable, or a
 /// source checkout driven by node.
 fn find_engine() -> Option<Engine> {
@@ -105,6 +134,30 @@ fn find_engine() -> Option<Engine> {
         return Some(Engine::NodeScript(script));
     }
     None
+}
+
+/// Point the shell at the engine and interface Tauri bundled into the app's resource
+/// directory, when they are actually there.
+///
+/// A packaged app keeps its payload under `resource_dir()` (on Linux the AppImage mount
+/// or `/usr/lib/<identifier>`), not next to the binary, so the beside-the-executable
+/// fallbacks in `find_engine()` cannot see it. Exporting `SYSCODE_ENGINE` here lets the
+/// existing override branch pick the bundled engine up, and the engine the shell spawns
+/// inherits `SYSCODE_WEB` for the bundled interface. Explicit overrides win, and in a
+/// dev checkout the resources are absent so nothing changes.
+fn configure_bundled_resources(app: &tauri::AppHandle) {
+    let dir = match app.path().resource_dir() {
+        Ok(dir) => dir,
+        Err(_) => return,
+    };
+    let engine = dir.join("engine").join("syscode-engine");
+    if engine.exists() && std::env::var_os("SYSCODE_ENGINE").is_none() {
+        std::env::set_var("SYSCODE_ENGINE", &engine);
+    }
+    let web = dir.join("web");
+    if web.join("index.html").exists() && std::env::var_os("SYSCODE_WEB").is_none() {
+        std::env::set_var("SYSCODE_WEB", &web);
+    }
 }
 
 fn spawn_engine(project: &str, port: u16) -> Result<(String, Option<Child>), String> {
@@ -197,7 +250,7 @@ async fn start_engine(
     let target = project
         .filter(|s| !s.trim().is_empty())
         .or_else(|| std::env::var("SYSCODE_PROJECT").ok())
-        .unwrap_or_else(|| repo_root().display().to_string());
+        .unwrap_or_else(|| default_project().display().to_string());
     let (message, child) = spawn_engine(&target, p)?;
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     if let Some(mut previous) = guard.take() {
@@ -450,7 +503,7 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_PORT);
     let project =
-        std::env::var("SYSCODE_PROJECT").unwrap_or_else(|_| repo_root().display().to_string());
+        std::env::var("SYSCODE_PROJECT").unwrap_or_else(|_| default_project().display().to_string());
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -462,6 +515,8 @@ fn main() {
             pick_directory
         ])
         .setup(move |app| {
+            // Make the bundled engine + interface discoverable before the first spawn.
+            configure_bundled_resources(app.handle());
             let spawn_result = spawn_engine(&project, port);
             match spawn_result {
                 Ok((msg, child)) => {
