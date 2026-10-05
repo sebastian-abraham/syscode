@@ -5,7 +5,7 @@
 import path from 'node:path';
 import { readFileSync } from 'node:fs';
 import type {
-  Anchor, ChatMessage, DetectedChange, JournalEntry, MapEdge, MapNode, MapOp, MemoryInfo, Note, ProjectInfo,
+  Anchor, ChatMessage, ChatSession, DetectedChange, JournalEntry, MapEdge, MapNode, MapOp, MemoryInfo, Note, ProjectInfo,
   Proposal, RefineResult, RefreshReport, RepoFacts, ScopedContext, SyscodeConfig,
 } from '../types.ts';
 import { analyzeRepo } from '../analyze/index.ts';
@@ -528,12 +528,36 @@ export class MapService {
     return this.store.journal(limit);
   }
 
-  chatHistory(): ChatMessage[] {
-    return this.store.chatHistory();
+  chatHistory(sessionId?: string | null, limit?: number): ChatMessage[] {
+    return this.store.chatHistory(sessionId, limit);
   }
 
   addChat(m: ChatMessage): void {
     this.store.addChat(m);
+  }
+
+  sessions(): ChatSession[] {
+    return this.store.sessions();
+  }
+
+  session(id: string): ChatSession | undefined {
+    return this.store.session(id);
+  }
+
+  createSession(title?: string): ChatSession {
+    return this.store.createSession(title);
+  }
+
+  renameSession(id: string, title: string): ChatSession | undefined {
+    return this.store.renameSession(id, title);
+  }
+
+  deleteSession(id: string): void {
+    this.store.deleteSession(id);
+  }
+
+  touchSession(id: string, title?: string): ChatSession | undefined {
+    return this.store.touchSession(id, title);
   }
 
   setConfig(patch: Partial<SyscodeConfig>): SyscodeConfig {

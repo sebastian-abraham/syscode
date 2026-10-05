@@ -6,7 +6,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
-import type { Anchor, ChatMessage, JournalEntry, MapEdge, MapNode, Note, Proposal } from '../types.ts';
+import type { Anchor, ChatMessage, ChatSession, JournalEntry, MapEdge, MapNode, Note, Proposal } from '../types.ts';
 
 const SCHEMA = `
 create table if not exists meta (k text primary key, v text not null);
@@ -52,9 +52,13 @@ create table if not exists journal (
   id text primary key, at text not null, actor text not null, action text not null,
   detail text not null, node_id text
 );
+create table if not exists chat_sessions (
+  id text primary key, title text not null, created_at text not null, updated_at text not null
+);
 create table if not exists chat (
   id text primary key, role text not null, text text not null, node_id text,
-  created_at text not null, brain text not null default 'heuristic', model text, proposal_id text
+  created_at text not null, brain text not null default 'heuristic', model text, proposal_id text,
+  session_id text
 );
 create table if not exists files (
   path text primary key, lang text not null, loc integer not null, hash text not null,
@@ -87,6 +91,34 @@ export class Store {
     this.db = new DatabaseSync(this.file);
     this.db.exec('pragma journal_mode = wal;');
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /**
+   * `create table if not exists` never adds a column to a database that already exists, so a
+   * schema change needs its own step. Every statement here is idempotent: reopening a migrated
+   * database is a no-op.
+   */
+  private migrate(): void {
+    const columns = this.db.prepare('pragma table_info(chat)').all() as { name: string }[];
+    if (!columns.some((c) => c.name === 'session_id')) {
+      this.db.exec('alter table chat add column session_id text');
+    }
+    this.db.exec('create index if not exists chat_session on chat(session_id)');
+
+    // Messages that predate sessions (null/empty session_id) become one conversation, so
+    // nothing the developer wrote is lost and the history keeps a sensible shape.
+    const orphans = this.db
+      .prepare("select id, created_at from chat where session_id is null or session_id = '' order by created_at")
+      .all() as { id: string; created_at: string }[];
+    if (!orphans.length) return;
+    const id = newId('sess');
+    const createdAt = orphans[0]!.created_at;
+    const updatedAt = orphans[orphans.length - 1]!.created_at;
+    this.db
+      .prepare('insert into chat_sessions (id, title, created_at, updated_at) values (?, ?, ?, ?)')
+      .run(id, 'Earlier conversation', createdAt, updatedAt);
+    this.db.prepare("update chat set session_id = ? where session_id is null or session_id = ''").run(id);
   }
 
   close(): void {
@@ -344,11 +376,89 @@ export class Store {
 
   /* ------------------------------------------------------------------ chat */
 
-  chatHistory(limit = 200): ChatMessage[] {
-    const rows = this.db.prepare('select * from chat order by created_at desc limit ?').all(limit) as Record<string, unknown>[];
+  private rowToSession(r: Record<string, unknown>, messageCount?: number): ChatSession {
+    return {
+      id: String(r.id),
+      title: String(r.title),
+      createdAt: String(r.created_at),
+      updatedAt: String(r.updated_at),
+      ...(messageCount === undefined ? {} : { messageCount }),
+    };
+  }
+
+  /** Conversations, most recently active first, each with its message count. */
+  sessions(): ChatSession[] {
+    const rows = this.db
+      .prepare(
+        `select s.*, count(c.id) as message_count
+           from chat_sessions s left join chat c on c.session_id = s.id
+          group by s.id order by s.updated_at desc`,
+      )
+      .all() as Record<string, unknown>[];
+    return rows.map((r) => this.rowToSession(r, Number(r.message_count ?? 0)));
+  }
+
+  session(id: string): ChatSession | undefined {
+    const r = this.db.prepare('select * from chat_sessions where id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!r) return undefined;
+    const count = (this.db.prepare('select count(*) as c from chat where session_id = ?').get(id) as { c: number }).c;
+    return this.rowToSession(r, count);
+  }
+
+  createSession(title = 'New chat'): ChatSession {
+    const ts = now();
+    const session: ChatSession = { id: newId('sess'), title: title.trim() || 'New chat', createdAt: ts, updatedAt: ts };
+    this.db
+      .prepare('insert into chat_sessions (id, title, created_at, updated_at) values (?, ?, ?, ?)')
+      .run(session.id, session.title, session.createdAt, session.updatedAt);
+    return session;
+  }
+
+  renameSession(id: string, title: string): ChatSession | undefined {
+    const clean = title.trim();
+    if (!clean) return this.session(id);
+    this.db.prepare('update chat_sessions set title = ?, updated_at = ? where id = ?').run(clean, now(), id);
+    return this.session(id);
+  }
+
+  /** Deleting a conversation takes its messages with it. */
+  deleteSession(id: string): void {
+    this.db.prepare('delete from chat where session_id = ?').run(id);
+    this.db.prepare('delete from chat_sessions where id = ?').run(id);
+  }
+
+  /** Bump a session to the top of the list; set the title only when one is given. */
+  touchSession(id: string, title?: string): ChatSession | undefined {
+    const clean = title?.trim();
+    if (clean) {
+      this.db.prepare('update chat_sessions set title = ?, updated_at = ? where id = ?').run(clean, now(), id);
+    } else {
+      this.db.prepare('update chat_sessions set updated_at = ? where id = ?').run(now(), id);
+    }
+    return this.session(id);
+  }
+
+  private newestSessionId(): string | undefined {
+    const row = this.db.prepare('select id from chat_sessions order by updated_at desc limit 1').get() as
+      | { id: string }
+      | undefined;
+    return row?.id;
+  }
+
+  /**
+   * Messages of one conversation in reading order. With no session id, the newest conversation
+   * is used so callers that predate sessions (the agent's short-term memory) still get context.
+   */
+  chatHistory(sessionId?: string | null, limit = 200): ChatMessage[] {
+    const id = sessionId ?? this.newestSessionId();
+    if (!id) return [];
+    const rows = this.db
+      .prepare('select * from chat where session_id = ? order by created_at desc limit ?')
+      .all(id, limit) as Record<string, unknown>[];
     return rows
       .map((r) => ({
         id: String(r.id),
+        sessionId: String(r.session_id),
         role: String(r.role) as ChatMessage['role'],
         text: String(r.text),
         nodeId: (r.node_id as string | undefined) ?? null,
@@ -361,8 +471,9 @@ export class Store {
   }
 
   addChat(m: ChatMessage): void {
-    this.db.prepare('insert into chat (id, role, text, node_id, created_at, brain, model, proposal_id) values (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(m.id, m.role, m.text, m.nodeId ?? null, m.createdAt, m.brain, m.model ?? null, m.proposalId ?? null);
+    this.db
+      .prepare('insert into chat (id, session_id, role, text, node_id, created_at, brain, model, proposal_id) values (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(m.id, m.sessionId, m.role, m.text, m.nodeId ?? null, m.createdAt, m.brain, m.model ?? null, m.proposalId ?? null);
   }
 
   /* ----------------------------------------------------------- file index */

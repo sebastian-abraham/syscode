@@ -7,7 +7,7 @@ swappable for a Tauri shell or an editor extension later.
 Types for every payload are in `packages/core/src/types.ts` — import them, don't redefine them:
 
 ```ts
-import type { MapView, MapNode, MapEdge, Proposal, ProjectInfo, ScopedContext, ChatEvent, RefreshReport } from '../../packages/core/src/types.ts';
+import type { MapView, MapNode, MapEdge, Proposal, ProjectInfo, ScopedContext, ChatEvent, ChatMessage, ChatSession, RefreshReport } from '../../packages/core/src/types.ts';
 ```
 
 ## HTTP API
@@ -30,8 +30,12 @@ import type { MapView, MapNode, MapEdge, Proposal, ProjectInfo, ScopedContext, C
 `GET /api/proposals` → `Proposal[]`
 `POST /api/proposals/:id/approve` → `{ proposal: Proposal; view: MapView }`
 `POST /api/proposals/:id/reject` → `Proposal`
-`POST /api/chat` `{ message, nodeId? }` → **SSE stream** of `ChatEvent` (`token` / `context` / `proposal` / `notice` / `done`)
-`GET /api/chat/history` → `ChatMessage[]`
+`POST /api/chat` `{ message, nodeId?, sessionId? }` → **SSE stream** of `ChatEvent` (`session` / `token` / `context` / `proposal` / `notice` / `done`). The first event is always `{type:'session', session}`; if `sessionId` is missing or unknown a conversation is created, titled from the first line of the message.
+`GET /api/chat?session=<id>` → `ChatMessage[]` — that conversation in reading order; with no `session`, the newest conversation's messages (or `[]` if there are none).
+`GET /api/chat/sessions` → `{ sessions: ChatSession[] }` — most recently active first, each with `messageCount`.
+`POST /api/chat/sessions` `{ title? }` → `ChatSession` (201) — a new conversation, default title `New chat`.
+`PATCH /api/chat/sessions/:id` `{ title }` → `ChatSession` — rename.
+`DELETE /api/chat/sessions/:id` → `{ deleted: true }` — removes the conversation and its messages.
 `GET /api/journal?limit=50` → `JournalEntry[]`
 `GET /api/config` / `PATCH /api/config` → `SyscodeConfig` — provider/model settings (key is write-only, never echoed)
 `GET /api/config/models` → `{ brain, models: ModelChoice[] }` — what the provider can actually serve; `supported:false` means this client cannot speak that model's endpoint shape

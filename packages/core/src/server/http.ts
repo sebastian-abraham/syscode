@@ -14,7 +14,7 @@ import {
   WorkspaceError, createProject, defaultParentDir, forgetProject, rememberProject, workspaceInfo,
 } from '../workspace.ts';
 import { newId } from '../store/db.ts';
-import type { ChatEvent, ChatMessage, MapNode, Note } from '../types.ts';
+import type { ChatEvent, ChatMessage, ChatSession, MapNode, Note } from '../types.ts';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -92,6 +92,12 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
   } catch {
     return {};
   }
+}
+
+/** Name a conversation after its opening message: first line, trimmed, capped at 48 chars. */
+function sessionTitle(message: string): string {
+  const firstLine = message.split('\n')[0]!.trim();
+  return firstLine.slice(0, 48).trim() || 'New chat';
 }
 
 export async function startServer(root: string, opts: ServerOptions = {}): Promise<SyscodeServer> {
@@ -399,8 +405,44 @@ async function handleApi(
 
   /* ------------------------------------------------------------------ chat */
   if (seg[0] === 'chat') {
+    if (seg[1] === 'sessions') {
+      if (seg.length === 2) {
+        if (method === 'GET') {
+          json(res, 200, { sessions: svc.sessions() });
+          return;
+        }
+        if (method === 'POST') {
+          const body = await readBody(req);
+          const title = typeof body.title === 'string' ? body.title : undefined;
+          const session = svc.createSession(title);
+          events.emit('change', { type: 'sessions-changed' });
+          json(res, 201, session);
+          return;
+        }
+      }
+      const id = seg[2];
+      if (id && method === 'PATCH') {
+        const body = await readBody(req);
+        const session = svc.renameSession(id, String(body.title ?? ''));
+        if (!session) {
+          json(res, 404, { error: 'session not found' });
+          return;
+        }
+        events.emit('change', { type: 'sessions-changed' });
+        json(res, 200, session);
+        return;
+      }
+      if (id && method === 'DELETE') {
+        svc.deleteSession(id);
+        events.emit('change', { type: 'sessions-changed' });
+        json(res, 200, { deleted: true });
+        return;
+      }
+      json(res, 404, { error: 'unknown session action' });
+      return;
+    }
     if (method === 'GET') {
-      json(res, 200, svc.chatHistory());
+      json(res, 200, svc.chatHistory(query.get('session')));
       return;
     }
     if (method === 'POST') {
@@ -411,8 +453,17 @@ async function handleApi(
         json(res, 400, { error: 'message is required' });
         return;
       }
+      // A chat belongs to a conversation. If the client names one that exists, use it;
+      // otherwise (missing or unknown) open a new conversation named after the message.
+      const requested = typeof body.sessionId === 'string' ? body.sessionId : undefined;
+      let session: ChatSession | undefined = requested ? svc.session(requested) : undefined;
+      if (!session) {
+        session = svc.createSession(sessionTitle(message));
+        events.emit('change', { type: 'sessions-changed' });
+      }
       const userMsg: ChatMessage = {
         id: newId('msg'),
+        sessionId: session.id,
         role: 'user',
         text: message,
         nodeId,
@@ -420,6 +471,9 @@ async function handleApi(
         brain: svc.brain.mode,
       };
       svc.addChat(userMsg);
+      // The first message names the conversation; a later one only bumps it to the top.
+      const retitle = session.title === 'New chat' ? sessionTitle(message) : undefined;
+      session = svc.touchSession(session.id, retitle) ?? session;
 
       res.writeHead(200, {
         'content-type': 'text/event-stream',
@@ -428,6 +482,8 @@ async function handleApi(
         'x-accel-buffering': 'no',
       });
       const send = (event: ChatEvent) => res.write(`data: ${JSON.stringify(event)}\n\n`);
+      // First event: the conversation this stream is writing into, so the client learns the id.
+      send({ type: 'session', session });
       send({ type: 'notice', level: 'info', text: `scoped to ${nodeId ? svc.node(nodeId)?.label ?? 'node' : 'the whole map'}` });
 
       let answer = '';
@@ -446,6 +502,7 @@ async function handleApi(
       }
       svc.addChat({
         id: newId('msg'),
+        sessionId: session.id,
         role: 'agent',
         text: answer,
         nodeId,

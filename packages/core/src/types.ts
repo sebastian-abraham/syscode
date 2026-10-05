@@ -218,14 +218,26 @@ export interface RepoFacts {
 
 /** Chat events streamed to the interface (SSE). */
 export type ChatEvent =
+  | { type: 'session'; session: ChatSession }
   | { type: 'token'; text: string }
   | { type: 'context'; context: ScopedContext }
   | { type: 'proposal'; proposal: Proposal }
   | { type: 'notice'; level: 'info' | 'warn'; text: string }
   | { type: 'done'; messageId: string };
 
+/** A named conversation. Messages belong to exactly one session. */
+export interface ChatSession {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Present on listings; the store counts the messages per session. */
+  messageCount?: number;
+}
+
 export interface ChatMessage {
   id: string;
+  sessionId: string;
   role: 'user' | 'agent';
   text: string;
   nodeId: string | null;
