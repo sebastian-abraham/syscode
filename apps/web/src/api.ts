@@ -1,6 +1,7 @@
 import type {
   ChatEvent,
   ChatMessage,
+  ChatSession,
   EdgeKind,
   JournalEntry,
   MapEdge,
@@ -200,7 +201,20 @@ export const api = {
   rejectProposal: (id: string) =>
     req<Proposal>(`/proposals/${enc(id)}/reject`, { method: 'POST' }),
 
-  chatHistory: () => req<ChatMessage[]>('/chat/history'),
+  chatHistory: (sessionId?: string | null) =>
+    req<ChatMessage[]>(`/chat${sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''}`),
+
+  // ---- Conversations are things you can keep, not one endless scroll ------
+  chatSessions: () => req<{ sessions: ChatSession[] }>('/chat/sessions'),
+  createChatSession: (title?: string) =>
+    req<ChatSession>('/chat/sessions', { method: 'POST', body: { title } as unknown as BodyInit }),
+  renameChatSession: (id: string, title: string) =>
+    req<ChatSession>(`/chat/sessions/${id}`, {
+      method: 'PATCH',
+      body: { title } as unknown as BodyInit,
+    }),
+  deleteChatSession: (id: string) =>
+    req<{ deleted: boolean }>(`/chat/sessions/${id}`, { method: 'DELETE' }),
 
   journal: (limit = 50) => req<JournalEntry[]>(`/journal?limit=${limit}`),
 
@@ -306,7 +320,7 @@ async function openStream(url: string, init: RequestInit, onMessage: (m: SSEMess
 
 /** `POST /api/chat` → live `ChatEvent` stream. */
 export async function streamChat(
-  body: { message: string; nodeId?: string | null },
+  body: { message: string; nodeId?: string | null; sessionId?: string },
   handlers: { onEvent: (event: ChatEvent) => void; onError?: (err: unknown) => void; signal?: AbortSignal },
 ): Promise<void> {
   try {

@@ -11,6 +11,7 @@ import {
 import { api, ApiError, streamChat, subscribeEvents, type CodeSlice, type ProbeResult, type ProviderInfo, type WorkspaceActionResult } from './api.ts';
 import type {
   ChatMessage,
+  ChatSession,
   EdgeKind,
   JournalEntry,
   MapNode,
@@ -28,6 +29,30 @@ import type {
 } from './types.ts';
 
 export type InspectorTab = 'overview' | 'notes' | 'context' | 'journal';
+
+/**
+ * Which conversation a project was last left on. Kept in the browser because it is a
+ * preference of this window, not a fact about the project.
+ */
+function readRememberedSession(root: string | null): string | null {
+  if (!root) return null;
+  try {
+    return window.localStorage.getItem(`syscode.session.${root}`);
+  } catch {
+    return null;
+  }
+}
+
+function rememberSession(root: string | null, id: string | null): void {
+  if (!root) return;
+  try {
+    if (id) window.localStorage.setItem(`syscode.session.${root}`, id);
+    else window.localStorage.removeItem(`syscode.session.${root}`);
+  } catch {
+    /* storage disabled — falling back to the newest conversation is fine */
+  }
+}
+
 export type Status = 'loading' | 'waiting' | 'ready';
 /** Whether the app is showing the project picker or a project's map. */
 export type Screen = 'start' | 'map';
@@ -70,6 +95,10 @@ export interface StoreValue {
   pendingProposals: Proposal[];
   chat: ChatMessage[];
   streaming: { id: string; text: string } | null;
+  /** Every conversation this project has, newest first. */
+  sessions: ChatSession[];
+  /** The conversation being written to; null means a new one that doesn't exist yet. */
+  activeSessionId: string | null;
   busy: BusyFlags;
   codePeek: CodePeekState | null;
   inspectorTab: InspectorTab;
@@ -133,6 +162,11 @@ export interface StoreValue {
   // chat
   sendChat: (text: string, scopeNodeId: string | null) => Promise<void>;
   setChatScope: (nodeId: string | null) => void;
+  /** Start a fresh conversation — it is only stored once the first message is sent. */
+  newChat: () => void;
+  openSession: (id: string) => Promise<void>;
+  renameSession: (id: string, title: string) => Promise<void>;
+  deleteSession: (id: string) => Promise<void>;
 
   // dialogs
   setAddNodeOpen: (open: boolean) => void;
@@ -196,6 +230,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [journal, setJournal] = useState<JournalEntry[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [chat, setChat] = useState<ChatMessage[]>([]);
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [streaming, setStreaming] = useState<{ id: string; text: string } | null>(null);
   const [busy, setBusy] = useState<BusyFlags>({
     view: false,
@@ -412,20 +448,29 @@ export function StoreProvider({ children }: { children: ReactNode }) {
    * never patched piecemeal. Shared by the project actions and the `project-changed` event.
    */
   const reloadProject = useCallback(async () => {
-    const [p, v, props, hist, jr, cfg, mem, ws] = await Promise.all([
+    const [p, v, props, jr, cfg, mem, ws, sess] = await Promise.all([
       api.project().catch(() => null),
       api.map(null).catch(() => null),
       api.proposals().catch(() => [] as Proposal[]),
-      api.chatHistory().catch(() => [] as ChatMessage[]),
       api.journal(60).catch(() => [] as JournalEntry[]),
       api.config().catch(() => null),
       api.memory().catch(() => null),
       api.workspace().catch(() => null),
+      api.chatSessions().catch(() => ({ sessions: [] as ChatSession[] })),
     ]);
     if (p) setProject(p);
     setProposals(props);
-    setChat(hist);
     setJournal(jr);
+    // Conversations: reopen the one this project was last left on, else the newest. A project
+    // with none starts on a fresh conversation that only becomes real when it is first used.
+    const conversations = sess.sessions;
+    setSessions(conversations);
+    const remembered = readRememberedSession(p?.root ?? null);
+    const reopen = conversations.find((s) => s.id === remembered) ?? conversations[0] ?? null;
+    setActiveSessionId(reopen?.id ?? null);
+    setChat(
+      reopen ? await api.chatHistory(reopen.id).catch(() => [] as ChatMessage[]) : [],
+    );
     if (cfg) setConfig(cfg);
     setMemory(mem);
     if (ws) {
@@ -877,6 +922,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         nodeId: scopeNodeId,
         createdAt: new Date().toISOString(),
         brain,
+        sessionId: activeSessionId ?? '',
       };
       setChat((list) => [...list, userMessage]);
       const agentId = uid('msg');
@@ -885,13 +931,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
       let acc = '';
       let proposalId: string | undefined;
+      // A conversation with no id yet is created by the engine on the first message and
+      // announced in the stream, so a new chat costs nothing until it is actually used.
+      let sessionId = activeSessionId;
       await streamChat(
-        { message: trimmed, nodeId: scopeNodeId ?? undefined },
+        { message: trimmed, nodeId: scopeNodeId ?? undefined, sessionId: sessionId ?? undefined },
         {
           onEvent: (event) => {
             if (event.type === 'token') {
               acc += event.text;
               setStreaming({ id: agentId, text: acc });
+            } else if (event.type === 'session') {
+              sessionId = event.session.id;
+              setActiveSessionId(event.session.id);
+              setSessions((list) => [
+                event.session,
+                ...list.filter((s) => s.id !== event.session.id),
+              ]);
+              rememberSession(projectRef.current?.root ?? null, event.session.id);
             } else if (event.type === 'context') {
               void openContext(event.context);
             } else if (event.type === 'proposal') {
@@ -921,11 +978,81 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           createdAt: new Date().toISOString(),
           brain,
           proposalId,
+          sessionId: sessionId ?? '',
         },
       ]);
+      // The engine titles a conversation from its first message; pick that up once the
+      // answer is in, so the list stops calling it 'New chat'.
+      if (sessionId) {
+        void api
+          .chatSessions()
+          .then(({ sessions: fresh }) => setSessions(fresh))
+          .catch(() => undefined);
+      }
       setBusy((b) => ({ ...b, chat: false }));
     },
-    [busy.chat, openContext, toast],
+    [busy.chat, activeSessionId, openContext, toast],
+  );
+
+  /** A new conversation that does not exist yet — the engine creates it on first send. */
+  const newChat = useCallback(() => {
+    setActiveSessionId(null);
+    setChat([]);
+    setChatScopeId(null);
+    setStreaming(null);
+    rememberSession(projectRef.current?.root ?? null, null);
+  }, []);
+
+  const openSession = useCallback(
+    async (id: string) => {
+      if (busy.chat) return;
+      try {
+        const history = await api.chatHistory(id);
+        setActiveSessionId(id);
+        setChat(history);
+        setChatScopeId(null);
+        setStreaming(null);
+        rememberSession(projectRef.current?.root ?? null, id);
+      } catch (err) {
+        toast('error', `Could not open that conversation: ${messageFromError(err)}`);
+      }
+    },
+    [busy.chat, toast],
+  );
+
+  const renameSession = useCallback(
+    async (id: string, title: string) => {
+      const clean = title.trim();
+      if (!clean) return;
+      try {
+        const updated = await api.renameChatSession(id, clean);
+        setSessions((list) => list.map((s) => (s.id === id ? { ...s, ...updated } : s)));
+      } catch (err) {
+        toast('error', `Could not rename that conversation: ${messageFromError(err)}`);
+      }
+    },
+    [toast],
+  );
+
+  const deleteSession = useCallback(
+    async (id: string) => {
+      if (busy.chat) return;
+      try {
+        await api.deleteChatSession(id);
+        const rest = sessions.filter((s) => s.id !== id);
+        setSessions(rest);
+        if (activeSessionId === id) {
+          const next = rest[0] ?? null;
+          setActiveSessionId(next?.id ?? null);
+          setChat(next ? await api.chatHistory(next.id).catch(() => [] as ChatMessage[]) : []);
+          rememberSession(projectRef.current?.root ?? null, next?.id ?? null);
+        }
+        toast('success', 'Conversation deleted');
+      } catch (err) {
+        toast('error', `Could not delete that conversation: ${messageFromError(err)}`);
+      }
+    },
+    [busy.chat, activeSessionId, sessions, toast],
   );
 
   const setChatScope = useCallback((nodeId: string | null) => setChatScopeId(nodeId), []);
@@ -968,6 +1095,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       pendingProposals,
       chat,
       streaming,
+      sessions,
+      activeSessionId,
       busy,
       codePeek,
       inspectorTab,
@@ -1011,6 +1140,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       rejectProposal,
       sendChat,
       setChatScope,
+      newChat,
+      openSession,
+      renameSession,
+      deleteSession,
       setAddNodeOpen,
       goToStart,
       resumeCurrent,
@@ -1042,6 +1175,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       pendingProposals,
       chat,
       streaming,
+      sessions,
+      activeSessionId,
       busy,
       codePeek,
       inspectorTab,
@@ -1085,6 +1220,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       rejectProposal,
       sendChat,
       setChatScope,
+      newChat,
+      openSession,
+      renameSession,
+      deleteSession,
       saveConfig,
       goToStart,
       resumeCurrent,

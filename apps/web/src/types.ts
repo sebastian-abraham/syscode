@@ -25,6 +25,7 @@ export type {
   RepoFacts,
   ChatEvent,
   ChatMessage,
+  ChatSession,
   JournalEntry,
   SyscodeConfig,
   RecentProject,
