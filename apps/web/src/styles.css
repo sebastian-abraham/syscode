@@ -577,6 +577,14 @@ select {
 .react-flow--moving .react-flow__viewport {
   will-change: transform;
 }
+/* One frame, right after a pan or zoom ends. It is not a visual effect: WebKitGTK leaves the
+   scaled layer holding a raster from the previous zoom and only rebuilds it when something
+   inside repaints, so the map stays soft until you happen to touch an edge. A hair of
+   transparency forces that rebuild — imperceptible, but the canvas comes back at full
+   quality at the scale it is actually at. */
+.react-flow--reraster .react-flow__viewport {
+  opacity: 0.999;
+}
 .react-flow__attribution {
   display: none;
 }

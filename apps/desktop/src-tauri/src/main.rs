@@ -544,25 +544,28 @@ fn probe_script(port: u16) -> String {
   // first project before measuring, or the numbers describe the picker instead of the canvas.
   function openProject(then) {{
     if (document.querySelector('.react-flow__node')) return then();
-    // The picker's markup has changed across revisions; try the known shapes, then fall
-    // back to any button that looks like a project row (it shows an absolute path).
-    var sels = ['.recent__body--button', '.recent__body', '[class*="recent"] button', '[class*="project"] button', '[class*="card"] button'];
-    var target = null;
-    for (var i = 0; i < sels.length && !target; i++) target = document.querySelector(sels[i]);
-    if (!target) {{
-      var all = document.querySelectorAll('button');
-      for (var j = 0; j < all.length; j++) {{
-        var t = (all[j].textContent || '');
-        if (t.indexOf('/home/') !== -1 || t.indexOf('/tmp/') !== -1) {{ target = all[j]; break; }}
-      }}
+    // The picker lists the current project (with its own Open button) and then recents, and
+    // a recent can be an empty folder. Try each until one actually renders a map, or the
+    // measurement describes an empty canvas.
+    var list = [].slice.call(document.querySelectorAll('button')).filter(function(b) {{
+      return (b.textContent || '').trim() === 'Open';
+    }});
+    list = list.concat([].slice.call(document.querySelectorAll('.recent__body--button')));
+    list = list.concat([].slice.call(document.querySelectorAll('[class*="recent"] button')));
+    if (!list.length) return then();
+    var i = 0;
+    function tryNext() {{
+      if (i >= list.length) return then();
+      var el = list[i++];
+      try {{ el.click(); }} catch (e) {{}}
+      var waited = 0;
+      var iv = setInterval(function() {{
+        waited += 250;
+        if (document.querySelector('.react-flow__node')) {{ clearInterval(iv); return then(); }}
+        if (waited > 6000) {{ clearInterval(iv); tryNext(); }}
+      }}, 250);
     }}
-    if (!target) return then();
-    target.click();
-    var waited = 0;
-    var iv = setInterval(function() {{
-      waited += 250;
-      if (document.querySelector('.react-flow__node') || waited > 10000) {{ clearInterval(iv); then(); }}
-    }}, 250);
+    tryNext();
   }}
   function measure() {{
     var start = performance.now(), frames = 0, last = start, deltas = [];
@@ -607,6 +610,23 @@ fn probe_script(port: u16) -> String {
         var zi = document.querySelector('.react-flow__controls-zoomin');
         var zo = document.querySelector('.react-flow__controls-zoomout');
         var n = window.__SYSCODE_FPS_ZOOM__ || 0;
+        if (n === -2) {{
+          // Wheel zoom, not the +/- buttons: React Flow takes a different path for it, and
+          // it is what a person actually does.
+          var pane = document.querySelector('.react-flow__pane') || document.querySelector('.react-flow');
+          if (!pane) return;
+          var r = pane.getBoundingClientRect();
+          var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+          var dir = -1;
+          setInterval(function() {{
+            pane.dispatchEvent(new WheelEvent('wheel', {{
+              bubbles: true, cancelable: true, clientX: cx, clientY: cy,
+              deltaY: dir * 120, deltaMode: 0
+            }}));
+            dir = -dir;
+          }}, 700);
+          return;
+        }}
         if (n < 0) {{
           // Keep zooming in and out forever: a settled screenshot cannot show a raster
           // that is only stale between two interactions.
