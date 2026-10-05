@@ -565,12 +565,12 @@ select {
 .react-flow {
   background: var(--bg-0);
 }
-/* The map is drawn inside one CSS-transformed layer at a fractional scale. WebKitGTK will
-   happily cache that layer's raster and, on zoom, scale the cached image up instead of
-   drawing the text again — which is why zooming in looked like an upscaled picture. Asking
-   for a composited layer up front (will-change/backface-visibility) makes that caching
-   certain, so promotion is granted only while a pan or zoom is actually in flight, and
-   dropped when it ends so the canvas is drawn fresh at the final scale. */
+/* The map is one CSS-transformed layer at a fractional scale, and WebKitGTK will cache that
+   layer's raster and scale the cached image instead of drawing the text again — which is what
+   makes it look like an upscaled picture while panning or zooming. Measured both ways on the
+   real webview: never promoting it costs a third of the frames (idle 120→104fps, interaction
+   95→76fps, worst frame 44→200ms), so the hint is granted while a gesture is in flight and
+   dropped when it ends, where the repaint below brings the canvas back to full quality. */
 .react-flow__viewport {
   transform-origin: 0 0;
 }

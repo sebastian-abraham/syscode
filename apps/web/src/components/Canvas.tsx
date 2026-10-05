@@ -115,8 +115,9 @@ function Flow() {
   const { fitView, setViewport } = useReactFlow();
   const lastFitRef = useRef<string>('__none__');
   const [pending, setPending] = useState<{ source: string; target: string } | null>(null);
-  // True while a pan/zoom gesture is in flight — the only time the canvas is granted a
-  // compositing hint (see the .react-flow--moving rule in styles.css).
+  // True while a pan/zoom gesture is in flight. Promoting the layer only then keeps the
+  // gesture smooth; it is dropped when the gesture ends, together with the repaint below,
+  // so the canvas is redrawn at full quality at the final scale.
   const [moving, setMoving] = useState(false);
   // One-frame flag that forces WebKit to rebuild the canvas surface after a gesture, so the
   // scaled layer is not left showing a raster from the previous zoom level.
@@ -272,14 +273,13 @@ function Flow() {
         onMoveEnd={(_e, viewport) => {
           const x = Math.round(viewport.x);
           const y = Math.round(viewport.y);
-          // Dropping the compositing hint is deliberate: it makes WebKit draw the canvas
-          // again at the final scale instead of reusing a raster from the previous zoom.
+          // Drop the gesture hint and make the canvas rebuild its surface at the final
+          // scale. WebKitGTK keeps the scaled layer's raster and simply scales it again
+          // after a pan or zoom, so the map goes soft until something inside it happens to
+          // repaint — which is why touching an edge used to snap it back to full quality.
+          // Force that repaint ourselves: one frame of imperceptible transparency makes
+          // WebKit build a fresh surface, drawn at the scale the canvas is actually at now.
           setMoving(false);
-          // WebKitGTK keeps the scaled layer's raster and simply scales it again after a pan
-          // or zoom, so the map goes soft until something inside it happens to repaint —
-          // which is why touching an edge used to snap it back to full quality. Force that
-          // repaint ourselves: one frame of imperceptible transparency makes WebKit build a
-          // fresh surface, drawn at the scale the canvas is actually at now.
           setReraster(true);
           window.requestAnimationFrame(() =>
             window.requestAnimationFrame(() => setReraster(false)),
