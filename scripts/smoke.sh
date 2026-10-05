@@ -121,6 +121,26 @@ curl -s -X DELETE "$BASE/api/node/$NEW_ID" > /dev/null
 # journal records what happened
 [ -n "$(curl -s "$BASE/api/journal" | j '.[0].action')" ]; check "journal records the session" $?
 
+# ------------------------------------------------------------ conversations
+# A conversation is created, listed, renamed, read and deleted — and the check cleans
+# up after itself, so running the suite does not litter the project's history.
+SESS=$(curl -s -X POST "$BASE/api/chat/sessions" -H 'content-type: application/json' -d '{"title":"smoke test conversation"}')
+SESS_ID=$(printf '%s' "$SESS" | j '.id')
+[ -n "$SESS_ID" ] && [ "$SESS_ID" != "null" ]; check "create a conversation" $?
+
+SESS_TITLE=$(curl -s "$BASE/api/chat/sessions" | jq -r --arg id "$SESS_ID" '.sessions[] | select(.id==$id) | .title')
+[ "$SESS_TITLE" = "smoke test conversation" ]; check "the new conversation is listed" $?
+
+RENAMED=$(curl -s -X PATCH "$BASE/api/chat/sessions/$SESS_ID" -H 'content-type: application/json' -d '{"title":"renamed by smoke"}' | j '.title')
+[ "$RENAMED" = "renamed by smoke" ]; check "rename a conversation" $?
+
+SESS_MSGS=$(curl -s "$BASE/api/chat?session=$SESS_ID" | jq -r 'length')
+[ "${SESS_MSGS:-1}" -eq 0 ]; check "a conversation keeps its own messages ($SESS_MSGS so far)" $?
+
+curl -s -X DELETE "$BASE/api/chat/sessions/$SESS_ID" > /dev/null
+STILL_THERE=$(curl -s "$BASE/api/chat/sessions" | jq -r --arg id "$SESS_ID" '[.sessions[] | select(.id==$id)] | length')
+[ "${STILL_THERE:-1}" -eq 0 ]; check "delete a conversation" $?
+
 echo
 echo "  $pass passed, $fail failed   (project: $NAME)"
 [ "$fail" -eq 0 ]
