@@ -54,6 +54,11 @@ function readEnvFileValue(name: string, file = path.join(homedir(), '.hermes', '
   return undefined;
 }
 
+/** Provider assumed when the machine holds a key but nothing has been configured. */
+const AUTO_PROVIDER: SyscodeConfig['provider'] = 'opencode-go';
+/** Model assumed for the auto-connected provider; the model dialog can change it. */
+const AUTO_MODEL = 'deepseek-v4.1-flash';
+
 export function loadConfig(root: string): SyscodeConfig {
   let fileCfg: Partial<SyscodeConfig> = {};
   try {
@@ -71,6 +76,18 @@ export function loadConfig(root: string): SyscodeConfig {
   if (env.SYSCODE_MODEL) cfg.model = env.SYSCODE_MODEL;
   if (env.SYSCODE_MAX_CONTEXT_TOKENS) cfg.maxContextTokens = Number(env.SYSCODE_MAX_CONTEXT_TOKENS) || cfg.maxContextTokens;
   if (env.SYSCODE_API_KEY) cfg.apiKey = env.SYSCODE_API_KEY;
+
+  // A machine that already holds a provider key should not have to be told twice. With
+  // nothing configured, opening as "no model connected" is a dead end that looks like a
+  // broken app — especially for a packaged build, which is launched from a menu and has no
+  // environment to set. An explicit choice (the project's config file, or the environment)
+  // always wins; this only fills the gap.
+  if (!fileCfg.provider && !env.SYSCODE_PROVIDER) {
+    if (resolveBrain({ ...cfg, provider: AUTO_PROVIDER }, env).mode === 'model') {
+      cfg.provider = AUTO_PROVIDER;
+      if (!fileCfg.model && !env.SYSCODE_MODEL) cfg.model = AUTO_MODEL;
+    }
+  }
   return cfg;
 }
 
