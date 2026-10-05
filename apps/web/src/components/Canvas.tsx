@@ -84,10 +84,12 @@ function positionsAreFlat(view: MapView): boolean {
 }
 
 export default function Canvas() {
+  // The canvas is measured from here so the map can be re-fitted when the window settles.
+  const wrapRef = useRef<HTMLDivElement | null>(null);
   return (
-    <div className="canvas-area">
+    <div className="canvas-area" ref={wrapRef}>
       <ReactFlowProvider>
-        <Flow />
+        <Flow wrapRef={wrapRef} />
       </ReactFlowProvider>
       <Breadcrumb />
       <CodePeek />
@@ -95,7 +97,7 @@ export default function Canvas() {
   );
 }
 
-function Flow() {
+function Flow({ wrapRef }: { wrapRef: React.RefObject<HTMLDivElement | null> }) {
   const {
     view,
     busy,
@@ -114,11 +116,10 @@ function Flow() {
   const [edges, setEdges, onEdgesChange] = useEdgesState<SysEdge>([]);
   const { fitView, setViewport } = useReactFlow();
   const lastFitRef = useRef<string>('__none__');
+  // Set once the developer pans or zooms by hand: after that the view is theirs, and a
+  // window resize must not throw their framing away.
+  const userAdjustedRef = useRef(false);
   const [pending, setPending] = useState<{ source: string; target: string } | null>(null);
-  // True while a pan/zoom gesture is in flight. Promoting the layer only then keeps the
-  // gesture smooth; it is dropped when the gesture ends, together with the repaint below,
-  // so the canvas is redrawn at full quality at the final scale.
-  const [moving, setMoving] = useState(false);
   // One-frame flag that forces WebKit to rebuild the canvas surface after a gesture, so the
   // scaled layer is not left showing a raster from the previous zoom level.
   const [reraster, setReraster] = useState(false);
@@ -192,6 +193,29 @@ function Flow() {
     return undefined;
   }, [view, buildNodes, buildEdges, setNodes, setEdges, fitView]);
 
+  // The window settles *after* the first paint: a tiled compositor hands the window its real
+  // size a moment later, and that size is not the one the map was fitted to. The result is a
+  // map framed for a wider window, so the right-hand side is clipped until something else
+  // re-fits it. Watch the canvas and re-fit whenever its size actually changes — unless the
+  // developer has taken the view over by hand, in which case it is theirs to keep.
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return undefined;
+    let lastW = el.clientWidth;
+    let lastH = el.clientHeight;
+    const observer = new ResizeObserver(() => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      if (Math.abs(w - lastW) < 8 && Math.abs(h - lastH) < 8) return;
+      lastW = w;
+      lastH = h;
+      if (userAdjustedRef.current) return;
+      void fitView({ padding: 0.3, duration: 0, maxZoom: 1 });
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [fitView, wrapRef]);
+
   // Selection is React Flow's own: clicking a node sets `selected` on that node and
   // re-renders it alone. This used to be mirrored into the whole nodes array on every
   // selection change, which rebuilt every node object — so a single click repainted the
@@ -254,9 +278,7 @@ function Flow() {
   return (
     <>
       <ReactFlow
-        className={[moving && 'react-flow--moving', reraster && 'react-flow--reraster']
-          .filter(Boolean)
-          .join(' ') || undefined}
+        className={reraster ? 'react-flow--reraster' : undefined}
         nodes={nodes}
         edges={edges}
         onNodesChange={onNodesChange}
@@ -269,7 +291,11 @@ function Flow() {
         // When the gesture ends, settle the canvas on whole pixels. The whole map is drawn
         // inside one scaled layer, so a fractional translation makes every repaint resample
         // the text — this is what keeps it from going soft after an interaction.
-        onMoveStart={() => setMoving(true)}
+        onMoveStart={(event) => {
+          // A user gesture (non-null event) means the framing is now theirs; a programmatic
+          // fit passes null and must not count.
+          if (event) userAdjustedRef.current = true;
+        }}
         onMoveEnd={(_e, viewport) => {
           const x = Math.round(viewport.x);
           const y = Math.round(viewport.y);
@@ -279,7 +305,6 @@ function Flow() {
           // repaint — which is why touching an edge used to snap it back to full quality.
           // Force that repaint ourselves: one frame of imperceptible transparency makes
           // WebKit build a fresh surface, drawn at the scale the canvas is actually at now.
-          setMoving(false);
           setReraster(true);
           window.requestAnimationFrame(() =>
             window.requestAnimationFrame(() => setReraster(false)),

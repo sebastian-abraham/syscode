@@ -594,6 +594,30 @@ fn probe_script(port: u16) -> String {
           long: over(33),
           interacted: interacted,
           nodes: document.querySelectorAll('.react-flow__node').length,
+          // How many node cards fall outside the canvas box. The window is handed its real
+          // size after the first paint, so a map fitted to the earlier size ends up clipped;
+          // this is the number that says whether the re-fit is doing its job.
+          outside: (function() {{
+            var pane = document.querySelector('.react-flow');
+            if (!pane) return null;
+            var pr = pane.getBoundingClientRect();
+            var n = 0;
+            document.querySelectorAll('.react-flow__node').forEach(function(el) {{
+              var r = el.getBoundingClientRect();
+              if (r.right > pr.right + 2 || r.left < pr.left - 2 || r.bottom > pr.bottom + 2 || r.top < pr.top - 2) n++;
+            }});
+            return n;
+          }})(),
+          viewport: (function() {{
+            var vp = document.querySelector('.react-flow__viewport');
+            return vp ? getComputedStyle(vp).transform : null;
+          }})(),
+          canvas: (function() {{
+            var pane = document.querySelector('.react-flow');
+            if (!pane) return null;
+            var r = pane.getBoundingClientRect();
+            return Math.round(r.width) + 'x' + Math.round(r.height);
+          }})(),
           href: location.href
         }});
         return;

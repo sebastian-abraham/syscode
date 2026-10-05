@@ -567,15 +567,13 @@ select {
 }
 /* The map is one CSS-transformed layer at a fractional scale, and WebKitGTK will cache that
    layer's raster and scale the cached image instead of drawing the text again — which is what
-   makes it look like an upscaled picture while panning or zooming. Measured both ways on the
-   real webview: never promoting it costs a third of the frames (idle 120→104fps, interaction
-   95→76fps, worst frame 44→200ms), so the hint is granted while a gesture is in flight and
-   dropped when it ends, where the repaint below brings the canvas back to full quality. */
+   makes it look like an upscaled picture while panning or zooming. So the layer is never
+   promoted (no will-change/backface-visibility at any time) and it repaints at the scale it is
+   actually at, which keeps the text drawn rather than stretched while moving. The cost is real
+   and measured: idle 120→104fps, interaction 95→76fps, worst frame 44→200ms. Sharp was chosen
+   over smooth here. */
 .react-flow__viewport {
   transform-origin: 0 0;
-}
-.react-flow--moving .react-flow__viewport {
-  will-change: transform;
 }
 /* One frame, right after a pan or zoom ends. It is not a visual effect: WebKitGTK leaves the
    scaled layer holding a raster from the previous zoom and only rebuilds it when something
