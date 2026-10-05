@@ -242,6 +242,12 @@ async function handleApi(
       json(res, 200, svc.proposals());
       return;
     }
+    if (seg[1] === 'reject-all' && method === 'POST') {
+      const rejected = svc.rejectAllProposals();
+      events.emit('change', { type: 'proposals-rejected', rejected });
+      json(res, 200, { rejected });
+      return;
+    }
     const id = seg[1];
     if (seg[2] === 'approve') {
       const out = svc.approveProposal(id);
@@ -255,6 +261,8 @@ async function handleApi(
     }
     if (seg[2] === 'reject') {
       const p = svc.rejectProposal(id);
+      // Tell the interface, or its pending count keeps showing proposals that are gone.
+      if (p) events.emit('change', { type: 'proposal-rejected' });
       json(res, p ? 200 : 404, p ?? { error: 'proposal not found' });
       return;
     }

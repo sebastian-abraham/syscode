@@ -440,6 +440,21 @@ export class MapService {
     return decided;
   }
 
+  /**
+   * Reject everything still pending, in one action.
+   *
+   * Proposals accumulate: every rescan and every refinement pass adds them, and a project
+   * that has been worked on for a while can carry hundreds. That is not a queue anyone can
+   * work through one at a time, and leaving it there makes the interface feel broken — the
+   * count alone is noise. Nothing is applied either way, so clearing is safe.
+   */
+  rejectAllProposals(): number {
+    const pending = this.store.allProposals().filter((p) => p.status === 'pending');
+    for (const p of pending) this.store.decideProposal(p.id, 'rejected');
+    if (pending.length) this.store.log('user', 'proposals-rejected', `${pending.length} pending proposal(s)`);
+    return pending.length;
+  }
+
   applyOp(op: MapOp): void {
     switch (op.op) {
       case 'add-node': {
