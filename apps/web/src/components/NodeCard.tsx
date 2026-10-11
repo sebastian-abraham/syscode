@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import type { MapNode, NodeKind, Provenance } from '../types.ts';
 import { IconChevron, IconLock, IconTag } from './icons.tsx';
@@ -7,6 +7,8 @@ export type SysNodeData = {
   node: MapNode;
   onOpen: (node: MapNode) => void;
   onRename: (id: string, label: string) => void;
+  /** Open this node in the inspector (the card's "read more"). */
+  onDetails: (node: MapNode) => void;
   justAdded: boolean;
 };
 
@@ -43,10 +45,21 @@ function metricLine(node: MapNode): string {
 }
 
 export function NodeCard({ data, selected }: NodeProps<SysNode>) {
-  const { node, onOpen, onRename, justAdded } = data;
+  const { node, onOpen, onRename, onDetails, justAdded } = data;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(node.label);
   const inputRef = useRef<HTMLInputElement>(null);
+  const summaryRef = useRef<HTMLDivElement>(null);
+  // The summary is clamped to three lines. Only offer "read more" when something is
+  // actually hidden behind the clamp — a button on every card is noise, and an
+  // unclamped card stops reading as a card.
+  const [clamped, setClamped] = useState(false);
+
+  useLayoutEffect(() => {
+    const el = summaryRef.current;
+    if (!el) return;
+    setClamped(el.scrollHeight > el.clientHeight + 1);
+  }, [node.summary, node.kind, node.level]);
 
   useEffect(() => {
     setDraft(node.label);
@@ -74,6 +87,8 @@ export function NodeCard({ data, selected }: NodeProps<SysNode>) {
   const classes = [
     'node',
     `node--${node.origin}`,
+    `node--kind-${node.kind}`,
+    `node--level-${node.level}`,
     selected ? 'node--selected' : '',
     node.stale ? 'node--stale' : '',
     justAdded ? 'node--just-added' : '',
@@ -135,7 +150,21 @@ export function NodeCard({ data, selected }: NodeProps<SysNode>) {
         )}
       </div>
 
-      <div className="node__summary">{node.summary}</div>
+      <div className="node__summary" ref={summaryRef}>
+        {node.summary}
+      </div>
+      {clamped && (
+        <button
+          type="button"
+          className="node__more nodrag"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDetails(node);
+          }}
+        >
+          Read more
+        </button>
+      )}
 
       <div className="node__metric">
         <span>{metricLine(node)}</span>

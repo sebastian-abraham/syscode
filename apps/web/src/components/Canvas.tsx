@@ -10,26 +10,65 @@ import {
   useEdgesState,
   useNodesState,
   useReactFlow,
+  useStore as useFlowStore,
   type Connection,
-  type Edge,
   type Node,
   type NodeMouseHandler,
 } from '@xyflow/react';
-import type { EdgeKind, MapEdge, MapNode, MapView } from '../types.ts';
+import type { EdgeKind, MapNode, MapView, NodeKind } from '../types.ts';
+import { EDGE_KIND_COLOUR, edgePathStyle } from '../edgeStyle.ts';
 import { useStore } from '../store.tsx';
 import { useUi, type Theme } from '../ui.tsx';
 import { NodeCard, type SysNode, type SysNodeData } from './NodeCard.tsx';
-import SysEdgeComponent from './SysEdge.tsx';
+import SysEdgeComponent, { type SysEdge, type SysEdgeData } from './SysEdge.tsx';
 import Breadcrumb from './Breadcrumb.tsx';
 import CodePeek from './CodePeek.tsx';
+import Legend from './Legend.tsx';
 import { IconChevron } from './icons.tsx';
 
 const nodeTypes = { sysNode: NodeCard };
 const edgeTypes = { sysEdge: SysEdgeComponent };
 
-type SysEdge = Edge<{ edge: MapEdge }>;
-
 const EDGE_KINDS: EdgeKind[] = ['depends', 'data', 'triggers', 'stores', 'uses', 'custom'];
+
+/**
+ * The zoom the map is fitted to when it opens, and the floor under it.
+ *
+ * Fitting the *whole* map sounds right and is not: the root of fixtures/demo-app spans
+ * a 2250×1500 flow box, so "show everything" lands at 0.31 — every card 80px wide with
+ * 4px text, which is the unreadable grey grid this revamp exists to fix. So the opening
+ * fit stops at a legible scale and lets the map run past the viewport edges; zooming
+ * out is still there, one wheel-click away, and that is when the labels drop off.
+ * (A compact root layout is the other half of this, and belongs to the engine.)
+ */
+const FIT_MIN_ZOOM = 0.62;
+
+/**
+ * Below this zoom an edge's verb would render smaller than the cards' own text, so
+ * labels are only drawn at rest once the canvas is at or above it. Deliberately just
+ * under FIT_MIN_ZOOM: the opening screen always shows the flows, and zooming out to
+ * take in the whole picture drops the labels rather than piling them on top of cards.
+ */
+const LABEL_ZOOM = 0.58;
+
+/** Levels 0 and 1 (a system, a subsystem) get extra width, so the hierarchy reads. */
+const LEVEL_WIDTH: number[] = [16, 8, 0, 0];
+
+/** Every card used to be 260px wide, which is why a System and a Component looked alike. */
+const KIND_WIDTH: Record<NodeKind, number> = {
+  system: 300,
+  subsystem: 284,
+  feature: 268,
+  component: 260,
+  data: 252,
+  external: 244,
+  concern: 248,
+  planned: 248,
+};
+
+function nodeWidth(node: MapNode): number {
+  return Math.round(KIND_WIDTH[node.kind] + (LEVEL_WIDTH[node.level] ?? 0));
+}
 
 /**
  * The colours React Flow draws itself — dots, arrowheads, the minimap and the
@@ -91,6 +130,7 @@ export default function Canvas() {
       <ReactFlowProvider>
         <Flow wrapRef={wrapRef} />
       </ReactFlowProvider>
+      <Legend />
       <Breadcrumb />
       <CodePeek />
     </div>
@@ -102,6 +142,7 @@ function Flow({ wrapRef }: { wrapRef: React.RefObject<HTMLDivElement | null> }) 
     view,
     busy,
     justAddedId,
+    selected,
     selectNode,
     clearSelection,
     drillInto,
@@ -111,6 +152,13 @@ function Flow({ wrapRef }: { wrapRef: React.RefObject<HTMLDivElement | null> }) 
   } = useStore();
   const { theme } = useUi();
   const c = CANVAS[theme];
+
+  // The label level of detail. One subscription for the whole canvas, deliberately:
+  // the alternative is one viewport subscription per edge, which is 60 of them on a
+  // root map. The boolean selector means this re-renders once per threshold crossing,
+  // not once per frame of a zoom.
+  const labelsOn = useFlowStore((s) => s.transform[2] >= LABEL_ZOOM);
+  const focusId = selected?.id ?? null;
 
   const [nodes, setNodes, onNodesChange] = useNodesState<SysNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<SysEdge>([]);
@@ -140,34 +188,66 @@ function Flow({ wrapRef }: { wrapRef: React.RefObject<HTMLDivElement | null> }) 
           const p = fallback?.get(node.id) ?? { x: node.position?.x ?? 0, y: node.position?.y ?? 0 };
           return { x: Math.round(p.x), y: Math.round(p.y) };
         })(),
-        width: 260,
+        width: nodeWidth(node),
+        style: { width: nodeWidth(node) },
         data: {
           node,
           onOpen: (n: MapNode) => {
             if (n.childCount > 0) void drillInto(n.id);
           },
           onRename: (id: string, label: string) => void renameNode(id, label),
+          // The card's own "read more" opens the inspector for this node rather than
+          // unclamping the summary in place — the card stays a card at every level.
+          onDetails: (n: MapNode) => selectNode(n),
           justAdded: node.id === justAddedId,
         } satisfies SysNodeData,
       }));
     },
-    [drillInto, justAddedId, renameNode],
+    [drillInto, justAddedId, renameNode, selectNode],
   );
 
-  const buildEdges = useCallback((v: MapView): SysEdge[] => {
-    const ids = new Set(v.nodes.map((n) => n.id));
-    return v.edges
-      .filter((e) => ids.has(e.source) && ids.has(e.target))
-      .map((e) => ({
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        label: e.label,
-        type: 'sysEdge' as const,
-        data: { edge: e },
-        markerEnd: { type: MarkerType.ArrowClosed, width: 13, height: 13, color: c.edgeMarker },
-      }));
-  }, [c]);
+  const buildEdges = useCallback(
+    (v: MapView, focus: string | null, labels: boolean): SysEdge[] => {
+      const ids = new Set(v.nodes.map((n) => n.id));
+      return v.edges
+        .filter((e) => ids.has(e.source) && ids.has(e.target))
+        .map((e) => {
+          const incident = focus !== null && (e.source === focus || e.target === focus);
+          const dim = focus !== null && !incident;
+          return {
+            id: e.id,
+            source: e.source,
+            target: e.target,
+            label: e.label,
+            type: 'sysEdge' as const,
+            // The classes carry the two readings of a link (what it is / how it is known)
+            // plus the focus state; the line itself is styled by React Flow from `style`.
+            className: [
+              'edge',
+              `edge--k-${e.kind}`,
+              `edge--o-${e.origin}`,
+              incident ? 'edge--incident' : '',
+              dim ? 'edge--dim' : '',
+            ]
+              .filter(Boolean)
+              .join(' '),
+            data: {
+              edge: e,
+              labelVisible: incident || (labels && !dim),
+              dim,
+            } satisfies SysEdgeData,
+            style: edgePathStyle(e),
+            markerEnd: {
+              type: MarkerType.ArrowClosed,
+              width: 13,
+              height: 13,
+              color: EDGE_KIND_COLOUR[theme][e.kind],
+            },
+          };
+        });
+    },
+    [theme],
+  );
 
   useEffect(() => {
     if (!view) {
@@ -181,17 +261,25 @@ function Flow({ wrapRef }: { wrapRef: React.RefObject<HTMLDivElement | null> }) 
       const wasSelected = new Set(current.filter((n) => n.selected).map((n) => n.id));
       return buildNodes(view).map((n) => (wasSelected.has(n.id) ? { ...n, selected: true } : n));
     });
-    setEdges(buildEdges(view));
     const key = view.parent?.id ?? '__root__';
     if (lastFitRef.current !== key) {
       lastFitRef.current = key;
       const t = window.setTimeout(() => {
-        void fitView({ padding: 0.3, duration: 240, maxZoom: 1 });
+        void fitView({ padding: 0.3, duration: 240, maxZoom: 1, minZoom: FIT_MIN_ZOOM });
       }, 50);
       return () => window.clearTimeout(t);
     }
     return undefined;
-  }, [view, buildNodes, buildEdges, setNodes, setEdges, fitView]);
+  }, [view, buildNodes, setNodes, fitView]);
+
+  // Edges are rebuilt when the view, the selected node or the label threshold changes.
+  // Both of those decisions belong here rather than inside every edge component: an
+  // edge component that read the viewport itself would mean 60 viewport subscriptions
+  // on a root map, and the labels would then re-render one at a time.
+  useEffect(() => {
+    if (!view) return;
+    setEdges(buildEdges(view, focusId, labelsOn));
+  }, [view, focusId, labelsOn, buildEdges, setEdges]);
 
   // The window settles *after* the first paint: a tiled compositor hands the window its real
   // size a moment later, and that size is not the one the map was fitted to. The result is a
@@ -210,7 +298,7 @@ function Flow({ wrapRef }: { wrapRef: React.RefObject<HTMLDivElement | null> }) 
       lastW = w;
       lastH = h;
       if (userAdjustedRef.current) return;
-      void fitView({ padding: 0.3, duration: 0, maxZoom: 1 });
+      void fitView({ padding: 0.3, duration: 0, maxZoom: 1, minZoom: FIT_MIN_ZOOM });
     });
     observer.observe(el);
     return () => observer.disconnect();
@@ -278,7 +366,11 @@ function Flow({ wrapRef }: { wrapRef: React.RefObject<HTMLDivElement | null> }) 
   return (
     <>
       <ReactFlow
-        className={reraster ? 'react-flow--reraster' : undefined}
+        className={
+          [reraster ? 'react-flow--reraster' : '', labelsOn ? 'react-flow--labels' : '']
+            .filter(Boolean)
+            .join(' ') || undefined
+        }
         nodes={nodes}
         edges={edges}
         onNodesChange={onNodesChange}

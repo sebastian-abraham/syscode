@@ -635,12 +635,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           void refreshProject();
         }
       },
-      () => {
-        /* stream will retry through user actions; stay silent */
+      (err) => {
+        // The events stream has no retry of its own, so losing it means the map quietly
+        // stops tracking the engine. Say so: a map that looks live but is not is worse
+        // than a toast.
+        toast('warn', `Live updates disconnected — ${messageFromError(err)}. Reload to reconnect.`);
       },
     );
     return off;
-  }, [status, reloadProject, loadView, refreshProposals, refreshProject]);
+  }, [status, reloadProject, loadView, refreshProposals, refreshProject, toast]);
 
   // -------------------------------------------------------------------------
   // Navigation
@@ -931,6 +934,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
       let acc = '';
       let proposalId: string | undefined;
+      // The engine ends every chat stream with a `done` carrying the id of the message
+      // it wrote. Absence of that frame is how we know the reply was cut short, and the
+      // id is what the store should use — not one invented locally.
+      let doneSeen = false;
+      let engineMessageId: string | undefined;
       // A conversation with no id yet is created by the engine on the first message and
       // announced in the stream, so a new chat costs nothing until it is actually used.
       let sessionId = activeSessionId;
@@ -959,6 +967,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               });
             } else if (event.type === 'notice') {
               toast(event.level === 'warn' ? 'warn' : 'info', event.text);
+            } else if (event.type === 'done') {
+              doneSeen = true;
+              engineMessageId = event.messageId;
             }
           },
           onError: (err) => {
@@ -967,11 +978,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         },
       );
 
+      if (!doneSeen) {
+        toast('warn', 'The agent stream ended early — the reply below may be incomplete.');
+      }
       setStreaming(null);
       setChat((list) => [
         ...list,
         {
-          id: agentId,
+          id: engineMessageId ?? agentId,
           role: 'agent',
           text: acc || 'No response.',
           nodeId: scopeNodeId,

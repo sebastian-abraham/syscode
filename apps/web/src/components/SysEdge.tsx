@@ -1,10 +1,35 @@
 import { useState } from 'react';
-import { BaseEdge, EdgeLabelRenderer, getBezierPath, type EdgeProps } from '@xyflow/react';
+import {
+  BaseEdge,
+  EdgeLabelRenderer,
+  getBezierPath,
+  type Edge,
+  type EdgeProps,
+} from '@xyflow/react';
+import type { MapEdge } from '../types.ts';
 
 /**
- * Thin muted edge whose label stays hidden until the edge is hovered or
- * selected. Keeping labels off the resting canvas is what stops them colliding
- * with node cards (see the visual direction in docs/CONTRACT.md).
+ * What the canvas hands an edge: the model edge, plus what the *current* view says
+ * about it. The canvas owns both decisions (it is the only thing that knows the zoom
+ * and the selected node), so this component stays presentational and cheap: it does
+ * not subscribe to the viewport, and it re-renders only when its own data changes.
+ */
+export type SysEdgeData = {
+  edge: MapEdge;
+  /** The verb should be readable at rest: the zoom is high enough, or this edge is
+   *  one of the selected node's own. */
+  labelVisible: boolean;
+  /** Another node is focused and this edge is not incident to it. */
+  dim: boolean;
+};
+
+export type SysEdge = Edge<SysEdgeData, 'sysEdge'>;
+
+/**
+ * An edge that says what it is. Colour and dash come from the edge's kind and
+ * origin (see edgeStyle.ts); the verb sits on the line at rest once the canvas is
+ * zoomed in far enough for it to be legible, and appears on hover/selection at any
+ * zoom. Hovering an edge also promotes it over the dimmed background.
  */
 export default function SysEdge({
   id,
@@ -14,11 +39,11 @@ export default function SysEdge({
   targetY,
   sourcePosition,
   targetPosition,
-  label,
+  data,
   markerEnd,
   style,
   selected,
-}: EdgeProps) {
+}: EdgeProps<SysEdge>) {
   const [hovered, setHovered] = useState(false);
   const [path, labelX, labelY] = getBezierPath({
     sourceX,
@@ -29,7 +54,15 @@ export default function SysEdge({
     targetPosition,
   });
 
-  const show = hovered || selected;
+  const edge = data?.edge;
+  const show = hovered || selected || Boolean(data?.labelVisible);
+  const classes = [
+    'edge-label',
+    hovered || selected ? 'edge-label--hi' : '',
+    data?.dim && !hovered && !selected ? 'edge-label--dim' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
 
   return (
     <>
@@ -44,13 +77,13 @@ export default function SysEdge({
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
       />
-      {show && label ? (
+      {show && edge?.label ? (
         <EdgeLabelRenderer>
           <div
-            className="edge-label"
+            className={classes}
             style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
           >
-            {label}
+            {edge.label}
           </div>
         </EdgeLabelRenderer>
       ) : null}
