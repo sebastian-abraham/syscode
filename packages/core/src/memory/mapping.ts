@@ -144,3 +144,52 @@ export function memoryFromFacts(inputs: MemoryInputs): MemoryInfo {
     builtAt: new Date().toISOString(),
   };
 }
+
+/* ------------------------------------------------------------------ purpose -- */
+
+/** The body of one markdown section, without its heading. */
+function sectionBody(text: string, heading: RegExp): string {
+  const lines = text.split('\n');
+  const start = lines.findIndex((line) => heading.test(line.trim()));
+  if (start === -1) return '';
+  const body: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^#{1,6}\s/.test(line.trim())) break;
+    body.push(line);
+  }
+  return body.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+/** The first sentence, capped so that a headline stays a headline. */
+function firstSentence(text: string): string | null {
+  const clean = text.trim();
+  if (!clean) return null;
+  const match = /^(.{20,}?[.!?])(\s|$)/.exec(clean);
+  const sentence = match ? match[1] : clean;
+  return sentence.length > 220 ? `${sentence.slice(0, 217).trimEnd()}…` : sentence;
+}
+
+/**
+ * One sentence saying what this system is — the headline the canvas opens on (§5.1).
+ *
+ * The mapping pass already writes exactly this sentence as the opening of its brief, so
+ * when memory exists its first sentence is used verbatim. With no memory (or no model
+ * connected) the fallback is composed only from the facts: what the code is and how the
+ * map broke it up. It never claims something about the product that the facts do not
+ * support — a headline that guesses is worse than a headline that is plainly thin.
+ */
+export function projectPurpose(memoryText: string, facts: RepoFacts, areaCount: number): string | null {
+  const fromBrief = firstSentence(sectionBody(memoryText, /^##\s+what this is/i));
+  if (fromBrief) return fromBrief;
+
+  const { files, loc, byLang } = facts.totals;
+  if (!files) return null;
+  const langs = Object.entries(byLang)
+    .sort((a, b) => b[1].loc - a[1].loc)
+    .slice(0, 2)
+    .map(([lang]) => lang);
+  const what = langs.length > 1 ? `${langs[0]} and ${langs[1]}` : langs[0] ?? 'source';
+  const areas = areaCount > 0 ? `, mapped into ${areaCount} areas` : '';
+  return `${files} files of ${what} — ${loc.toLocaleString('en-US')} lines${areas}.`;
+}
+

@@ -24,6 +24,7 @@ import SysEdgeComponent, { type SysEdge, type SysEdgeData } from './SysEdge.tsx'
 import Breadcrumb from './Breadcrumb.tsx';
 import CodePeek from './CodePeek.tsx';
 import Legend from './Legend.tsx';
+import Headline from './Headline.tsx';
 import { IconChevron } from './icons.tsx';
 
 const nodeTypes = { sysNode: NodeCard };
@@ -131,6 +132,7 @@ export default function Canvas() {
         <Flow wrapRef={wrapRef} />
       </ReactFlowProvider>
       <Legend />
+      <Headline />
       <Breadcrumb />
       <CodePeek />
     </div>

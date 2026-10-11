@@ -2591,6 +2591,63 @@ select {
   color: var(--text-3);
 }
 
+/* ------------------------------------------------------------- headline -- */
+
+/* The first thing the canvas says: what this system is. One sentence from the engine's
+   mapping pass (MapView.purpose), sitting under the breadcrumb so the two read as one
+   block of orientation. Opaque on purpose — a translucent panel over a dense map shows
+   the cards behind it through the text. */
+.headline {
+  position: absolute;
+  left: 12px;
+  top: 56px;
+  z-index: 7;
+  max-width: 400px;
+  padding: 8px 11px 9px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  box-shadow: var(--shadow-card);
+}
+.headline__top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.headline__name {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.headline__purpose {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  line-height: 1.42;
+  color: var(--text);
+}
+.headline__stats {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--text-4);
+  font-variant-numeric: tabular-nums;
+}
+.headline__dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--text-4);
+  opacity: 0.6;
+}
+.headline__stale {
+  color: var(--stale);
+}
+
 /* --------------------------------------------------------------- legend -- */
 
 /* The key to the picture. Nothing explained the provenance stripe or the edge colours

@@ -15,7 +15,7 @@ import { proposeMap, type ProposedMap, type ProposedNode } from './heuristic.ts'
 import { applyReconcile, makeNode, reconcile } from './identity.ts';
 import { brainInfo, loadConfig, resolveBrain, saveConfig, type Brain } from '../config.ts';
 import { buildContext, estimateTokens } from '../memory/context.ts';
-import { buildProjectMemory } from '../memory/mapping.ts';
+import { buildProjectMemory, projectPurpose } from '../memory/mapping.ts';
 import { suggestRefinements, type RefineTarget } from '../llm/refine.ts';
 
 export interface CodePeek {
@@ -171,6 +171,7 @@ export class MapService {
     totalNodes: number;
     staleCount: number;
     truncated: boolean;
+    purpose: string | null;
   } {
     const all = this.store.allNodes();
     const parent = parentId ? all.find((n) => n.id === parentId) ?? null : null;
@@ -202,6 +203,14 @@ export class MapService {
       totalNodes: all.length,
       staleCount: all.filter((n) => n.stale).length,
       truncated,
+      // What this system is, for the headline: the mapping pass's opening sentence when
+      // there is memory, else composed from the facts. Recomputed per view because it is
+      // two string reads, and a cached headline that goes stale is worse than none.
+      purpose: projectPurpose(
+        this.store.getMeta('project.memory') ?? '',
+        this.facts,
+        all.filter((n) => n.parentId === null).length,
+      ),
     };
   }
 

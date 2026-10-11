@@ -96,6 +96,12 @@ export interface MapView {
   root: boolean;
   totalNodes: number;
   staleCount: number;
+  /**
+   * One sentence saying what this system is, for the headline on the canvas. Written by
+   * the mapping pass when there is memory, composed from the facts when there is not,
+   * null when there is nothing honest to say. Never hardcoded per project.
+   */
+  purpose: string | null;
 }
 
 export interface ProjectInfo {

@@ -607,12 +607,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setDefaultParentDir(ws.defaultParentDir);
     }
     if (cfg) setConfig(cfg);
+    // The map is the landing page (§3.1): when the engine is already serving a project,
+    // open it rather than parking on the picker — the picture is what explains the
+    // system, and choosing a *different* project is one click away (the header title).
+    if (!chosenRef.current && ws?.current) {
+      chosenRef.current = true;
+      await reloadProject();
+      return;
+    }
     // Only claim the start screen if the developer has not already chosen a project.
     // Without this guard, opening a project while init() is still in flight gets
     // undone a moment later when init() finishes and forces 'start' again.
     if (!chosenRef.current) setScreen('start');
     setStatus('ready');
-  }, []);
+  }, [reloadProject]);
 
   useEffect(() => {
     void init();

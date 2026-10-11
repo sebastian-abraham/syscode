@@ -13,7 +13,7 @@ import type { MapView, MapNode, MapEdge, Proposal, ProjectInfo, ScopedContext, C
 ## HTTP API
 
 `GET /api/project` → `ProjectInfo`
-`GET /api/map?parent=<nodeId|root>` → `MapView` — siblings of `parent` (default: level 0), their edges, breadcrumb.
+`GET /api/map?parent=<nodeId|root>` → `MapView` — siblings of `parent` (default: level 0), their edges, breadcrumb, and `purpose`: one sentence saying what this system is, for the headline on the canvas (the mapping pass's opening sentence when memory exists, else composed from the facts; `null` when there is nothing honest to say).
 `GET /api/node/:id` → `MapNode` (with `anchors`, `notes`, `childCount`)
 `GET /api/node/:id/context` → `ScopedContext` — exactly what the agent would be given for that node.
 `GET /api/node/:id/code?anchor=<idx>` → `{ path, start, end, text, highlight }` — file slice for the code peek.
@@ -72,6 +72,8 @@ Static assets are served from the same origin at `/`.
    engine guarantees a small count). Layout is left-to-right or top-down, airy, few edges.
 2. **Semantic zoom, not scale.** Clicking a node that `childCount > 0` drills into its contents
    (the view swaps to that node's children, breadcrumb grows). Esc / breadcrumb climbs back out.
+   The app opens on the map when the engine is already serving a project; the start screen is for
+   choosing a different one.
 3. **Plain-language first.** The node's `summary` is the primary text on the canvas — not the id,
    not a file path. Anchors (`file:line`) are secondary, in the inspector.
 4. **Honest badges.** `origin: 'verified'` = mechanical fact; `'inferred'` = agent judgement;
