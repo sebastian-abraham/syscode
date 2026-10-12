@@ -745,6 +745,18 @@ function areaSummary(plan: AreaPlan, usedBy: string[], dependsOn: string[]): str
 }
 
 function groupSummary(group: Group, parentSegment: string): string {
+  // Nothing here was read: say that, and say what is known instead — the language and the
+  // size. A summary that reads like understanding when there is none is the one thing this
+  // map must never do.
+  const read = group.files.filter((f) => !f.unparsed);
+  if (!read.length && group.files.length) {
+    const langs = [...new Set(group.files.map((f) => f.lang))].join(' and ');
+    const loc = locOf(group.files);
+    if (group.files.length === 1) {
+      return `${group.files[0].path} — ${loc} lines of ${langs}. Counted, not read: SysCode reads TypeScript, JavaScript and Python, so this one is mapped by where it sits, not by what is in it.`;
+    }
+    return `${group.files.length} ${langs} files, ${loc.toLocaleString('en-US')} lines. Counted, not read: SysCode reads TypeScript, JavaScript and Python, so these are mapped by where they sit, not by what is in them.`;
+  }
   if (group.files.length === 1) {
     const f = group.files[0];
     const ex = exportsPhrase([f]);
@@ -756,7 +768,8 @@ function groupSummary(group: Group, parentSegment: string): string {
   const role = group.synthetic ? undefined : roleFor(group.name) ?? roleFor(basename(group.dirs[0] ?? ''));
   const ex = exportsPhrase(group.files);
   const lead = role ? `${role} ` : '';
-  return `${lead}${ex || `Sits inside ${humanize(parentSegment)}.`}`;
+  const partial = read.length < group.files.length ? ` ${group.files.length - read.length} of these files could not be read.` : '';
+  return `${lead}${ex || `Sits inside ${humanize(parentSegment)}.`}${partial}`;
 }
 
 /* ---------------------------------------------------------------- assemble -- */
@@ -987,12 +1000,17 @@ function areaDetail(files: FileFacts[]): string {
 function groupDetail(group: Group): string {
   if (group.files.length === 1) {
     const f = group.files[0];
+    if (f.unparsed) {
+      return `${f.path} — ${f.loc} lines of ${f.lang}. No analyzer for this language yet, so no imports, symbols or calls were read.`;
+    }
     const exports = f.exports.length ? `Exports ${f.exports.slice(0, 6).map((e) => `\`${e}\``).join(', ')}.` : 'No exports.';
     const symbols = f.symbols.length ? `${f.symbols.length} top-level definition${f.symbols.length === 1 ? '' : 's'}.` : '';
     return `${f.path} — ${f.loc} lines. ${exports} ${symbols}`.trim();
   }
   const names = group.files.slice(0, 8).map((f) => f.path.split('/').pop());
-  return `${group.files.length} modules: ${names.join(', ')}${group.files.length > 8 ? ', …' : ''}.`;
+  const unread = group.files.filter((f) => f.unparsed).length;
+  const note = unread ? ` ${unread} of them could not be read (no analyzer for that language yet).` : '';
+  return `${group.files.length} modules: ${names.join(', ')}${group.files.length > 8 ? ', …' : ''}.${note}`;
 }
 
 /* --------------------------------------------------------------- layout ---- */

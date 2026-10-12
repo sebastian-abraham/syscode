@@ -68,6 +68,7 @@ export async function analyzeRepo(root: string, opts: ScanOptions = {}): Promise
   const declaredEntries = await readDeclaredEntries(abs);
 
   const files: FileFacts[] = [];
+  const parsedPaths = new Set<string>();
   for (const f of scanned) {
     if (!f.isSource) continue;
     let facts: FileFacts | undefined;
@@ -77,7 +78,21 @@ export async function analyzeRepo(root: string, opts: ScanOptions = {}): Promise
     } catch {
       facts = undefined;
     }
-    if (!facts) continue;
+    // Rust and Go are listed as analyzable but have no analyzer yet, and any language can
+    // fail to parse. Either way the file exists, so it goes on the map as counted-not-read
+    // rather than vanishing — a Go or Rust repo used to map to nothing at all.
+    if (!facts) facts = unparsedFacts(f);
+    facts.isEntry = detectEntry(f.path, declaredEntries);
+    files.push(facts);
+    parsedPaths.add(f.path);
+  }
+
+  // Code files outside the analyzable set (SQL, CSS, HTML, Java, Ruby, …) are part of the
+  // system too. They are counted, and the map says so.
+  for (const f of scanned) {
+    if (parsedPaths.has(f.path)) continue;
+    if (!CODE_LANGS.has(f.lang)) continue;
+    const facts = unparsedFacts(f);
     facts.isEntry = detectEntry(f.path, declaredEntries);
     files.push(facts);
   }
@@ -120,6 +135,28 @@ export async function analyzeRepo(root: string, opts: ScanOptions = {}): Promise
 }
 
 export type { ScannedFile };
+
+/**
+ * A file SysCode counted but could not read the structure of — a language with no analyzer,
+ * or one that failed to parse. The path, language, size and hash are facts. The empty
+ * imports/symbols/calls are *not* a claim that the file has none: `unparsed` says nobody
+ * looked, and everything that renders these facts has to say so too.
+ */
+function unparsedFacts(f: ScannedFile): FileFacts {
+  return {
+    path: f.path,
+    lang: f.lang,
+    loc: f.loc,
+    hash: f.hash,
+    isEntry: false,
+    imports: [],
+    symbols: [],
+    exports: [],
+    calls: [],
+    unparsed: true,
+  };
+}
+
 
 /** How many calls between the same two files are worth keeping — the verb needs a name, not a census. */
 const MAX_CALLS_PER_PAIR = 6;

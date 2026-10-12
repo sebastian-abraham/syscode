@@ -211,6 +211,13 @@ export interface FileFacts {
   exports: string[];
   /** Every call site in the file, in source order (also attached per symbol). */
   calls: CallRef[];
+  /**
+   * True when SysCode counted the file but could not read its structure — a language with
+   * no analyzer yet, or a file that failed to parse. The file still belongs on the map
+   * (it is part of the system, and its size and place are facts); what must never happen
+   * is the map implying it understood code it never read.
+   */
+  unparsed?: boolean;
 }
 
 export interface ImportFact {
