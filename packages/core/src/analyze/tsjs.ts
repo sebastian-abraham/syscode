@@ -5,10 +5,13 @@
  */
 import ts from 'typescript';
 import path from 'node:path';
-import type { FileFacts, ImportFact, SymbolFact } from '../types.ts';
+import type { CallRef, FileFacts, ImportFact, SymbolFact } from '../types.ts';
 import { countLoc, hashText, type ScannedFile } from './scan.ts';
 
 const RESOLVE_EXTS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+
+/** Per file. A file with more distinct callees than this is a dispatcher; the rest are noise. */
+const MAX_CALLS = 80;
 
 /** Map of repo-relative lowercased path (without extension) → real path, for import resolution. */
 export function buildPathIndex(files: ScannedFile[]): Map<string, string> {
@@ -58,18 +61,34 @@ export function analyzeTsJs(file: ScannedFile, index: Map<string, string>): File
   const imports: ImportFact[] = [];
   const symbols: SymbolFact[] = [];
   const exports = new Set<string>();
+  /** Local name → the module it came from, so a call can be attributed to a file. */
+  const bindings = new Map<string, { resolved?: string }>();
+  /** Call sites as written, resolved after the whole file has been read. */
+  const rawCalls: { name: string; line: number; objectName?: string }[] = [];
 
   const lineOf = (pos: number) => sf.getLineAndCharacterOfPosition(pos).line + 1;
 
   const pushImports = (spec: string, node: ts.Node) => {
     const pkg = packageOf(spec);
+    const resolved = resolveSpecifier(file.path, spec, index);
     imports.push({
       specifier: spec,
-      resolved: resolveSpecifier(file.path, spec, index),
+      resolved,
       external: Boolean(pkg),
       package: pkg,
       line: lineOf(node.getStart(sf)),
     });
+    // Remember what the file called each imported thing locally: that is how a call site
+    // gets a destination without any type information.
+    if (ts.isImportDeclaration(node) && node.importClause) {
+      const clause = node.importClause;
+      if (clause.name) bindings.set(clause.name.text, { resolved });
+      const named = clause.namedBindings;
+      if (named) {
+        if (ts.isNamespaceImport(named)) bindings.set(named.name.text, { resolved });
+        else for (const el of named.elements) bindings.set(el.name.text, { resolved });
+      }
+    }
   };
 
   const collectBindingNames = (name: ts.BindingName | undefined, into: Set<string>) => {
@@ -90,6 +109,16 @@ export function analyzeTsJs(file: ScannedFile, index: Map<string, string>): File
       pushImports(node.arguments[0].text, node);
     } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference) && node.moduleReference.expression && ts.isStringLiteral(node.moduleReference.expression)) {
       pushImports(node.moduleReference.expression.text, node);
+    }
+
+    // call sites: `f(...)` and `ns.f(...)`. Recorded as written; resolved below.
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      const line = lineOf(node.getStart(sf));
+      if (ts.isIdentifier(callee)) rawCalls.push({ name: callee.text, line });
+      else if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
+        rawCalls.push({ name: callee.name.text, line, objectName: callee.expression.text });
+      }
     }
 
     const exported = hasExportModifier(node);
@@ -140,6 +169,36 @@ export function analyzeTsJs(file: ScannedFile, index: Map<string, string>): File
     return true;
   });
 
+  // Resolve the call sites. A call counts when the name is something this file imported
+  // or something this file defines; anything else (a builtin, a local variable, a
+  // destructured callback) is dropped rather than guessed at. Deduped by name, so a
+  // function called forty times is one fact with the first line it is called on.
+  const localNames = new Set(uniqueSymbols.map((s) => s.name));
+  const calls: CallRef[] = [];
+  const seenCall = new Set<string>();
+  for (const raw of rawCalls) {
+    let ref: CallRef | undefined;
+    if (raw.objectName) {
+      // `ns.doThing()` — only when the object is a namespace import of ours.
+      const bound = bindings.get(raw.objectName);
+      if (bound) ref = { name: `${raw.objectName}.${raw.name}`, line: raw.line, from: bound.resolved };
+    } else {
+      const bound = bindings.get(raw.name);
+      if (bound) ref = { name: raw.name, line: raw.line, from: bound.resolved };
+      else if (localNames.has(raw.name)) ref = { name: raw.name, line: raw.line };
+    }
+    if (!ref) continue;
+    const key = `${ref.name}\u0000${ref.from ?? ''}`;
+    if (seenCall.has(key)) continue;
+    seenCall.add(key);
+    calls.push(ref);
+    if (calls.length >= MAX_CALLS) break;
+  }
+  for (const s of uniqueSymbols) {
+    const mine = calls.filter((c) => c.line >= s.line && c.line <= s.endLine);
+    if (mine.length) s.calls = mine;
+  }
+
   return {
     path: file.path,
     lang: file.lang,
@@ -149,6 +208,7 @@ export function analyzeTsJs(file: ScannedFile, index: Map<string, string>): File
     imports,
     symbols: uniqueSymbols,
     exports: [...exports],
+    calls,
   };
 }
 

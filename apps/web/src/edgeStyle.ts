@@ -42,13 +42,18 @@ export const EDGE_KIND_COLOUR: Record<Theme, Record<EdgeKind, string>> = {
   },
 };
 
-/** One-word reading of each kind, for the legend (a real edge prints its own verb). */
+/**
+ * What each kind *is*, in the legend. These are categories, not verbs: the verb on an edge
+ * ("reads", "sends", "imports") is derived from the code, and the kind is the shape of the
+ * link that verb belongs to. Keeping the two words apart is what stops the legend reading
+ * like a second, competing list of verbs.
+ */
 export const EDGE_KIND_LABEL: Record<EdgeKind, string> = {
-  depends: 'depends on',
+  depends: 'dependency',
   data: 'data',
-  triggers: 'triggers',
-  stores: 'stores',
-  uses: 'uses',
+  triggers: 'hand-off',
+  stores: 'storage',
+  uses: 'use',
   custom: 'custom',
 };
 

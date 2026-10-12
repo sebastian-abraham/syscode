@@ -209,6 +209,8 @@ export interface FileFacts {
   imports: ImportFact[];
   symbols: SymbolFact[];
   exports: string[];
+  /** Every call site in the file, in source order (also attached per symbol). */
+  calls: CallRef[];
 }
 
 export interface ImportFact {
@@ -227,11 +229,49 @@ export interface SymbolFact {
   line: number;
   endLine: number;
   exported: boolean;
+  /** Calls this symbol makes, inside its own lines. See `CallRef`. */
+  calls?: CallRef[];
+}
+
+/**
+ * One call site: what is being called, and where.
+ *
+ * Purely syntactic — the callee is matched by name against an import binding or a
+ * definition in the same file, with no type checking. That is the same bargain the rest
+ * of this analyzer makes: exact about what the text says, silent about what it cannot
+ * resolve. A name that matches nothing is dropped rather than guessed at.
+ */
+export interface CallRef {
+  name: string;
+  line: number;
+  /** Repo-relative module the callee was imported from, when it is an import. */
+  from?: string;
+  /** True when the match was textual rather than parsed (Python today). */
+  textual?: boolean;
+}
+
+/**
+ * A call that crosses files: who calls, which file defines the callee, and the line.
+ *
+ * This is what lets an edge say `calls createOrder` instead of `depends on` — a verb
+ * derived from what the code does rather than from what the target's directory is called.
+ */
+export interface CallFact {
+  /** Repo-relative path of the caller. */
+  from: string;
+  /** Repo-relative path that defines the callee. */
+  to: string;
+  symbol: string;
+  line: number;
+  /** True when the match was textual rather than parsed (Python today). */
+  textual?: boolean;
 }
 
 export interface RepoFacts {
   root: string;
   files: FileFacts[];
+  /** Calls that cross files, resolved by name. The raw material for edge verbs. */
+  calls: CallFact[];
   /** External packages actually imported, with the importer count. */
   externals: { name: string; usedBy: number; kind: 'runtime' | 'service' | 'framework' | 'unknown' }[];
   entryPoints: string[];

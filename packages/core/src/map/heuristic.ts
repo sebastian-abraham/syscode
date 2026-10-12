@@ -51,17 +51,96 @@ export interface ProposedEdge {
   callSites?: number;
 }
 
-/** Links found between one pair of nodes, with the citations behind them. */
-interface LinkSites {
-  count: number;
-  sites: { path: string; line: number }[];
+/** Every link found between one pair of nodes, in the two shapes the code shows. */
+interface PairLinks {
+  importSites: { path: string; line: number }[];
+  calls: { symbol: string; path: string; line: number }[];
 }
 
-function addSite(into: Map<string, LinkSites>, key: string, path: string, line: number | undefined): void {
-  const rec = into.get(key) ?? { count: 0, sites: [] };
-  rec.count += 1;
-  if (line !== undefined) rec.sites.push({ path, line });
+function addImportSite(into: Map<string, PairLinks>, key: string, path: string, line: number | undefined): void {
+  const rec = into.get(key) ?? { importSites: [], calls: [] };
+  if (line !== undefined) rec.importSites.push({ path, line });
   into.set(key, rec);
+}
+
+function addCallSite(into: Map<string, PairLinks>, key: string, symbol: string, path: string, line: number): void {
+  const rec = into.get(key) ?? { importSites: [], calls: [] };
+  rec.calls.push({ symbol, path, line });
+  into.set(key, rec);
+}
+
+/**
+ * What the callee's name says the link is. Five verbs, and no more: the list the product
+ * brief settled on. A call to `insertOrder` is a write, to `getUser` a read, to `enqueue`
+ * a send, to `render` a render, and anything else is a plain call.
+ *
+ * This is still a reading of a *name* — but of the function being called, in the code,
+ * instead of the folder the target happens to live in, which is what it replaces.
+ */
+const CALL_VERBS: { test: RegExp; verb: string; kind: MapEdge['kind'] }[] = [
+  { test: /^(get|load|find|fetch|read|list|query|select|lookup|count|exists)/i, verb: 'reads', kind: 'data' },
+  { test: /^(save|insert|write|update|upsert|set|put|delete|remove|create|add|persist|migrate|apply|record)/i, verb: 'writes', kind: 'data' },
+  { test: /^(send|publish|enqueue|dispatch|notify|post|queue|schedule|trigger|deliver)/i, verb: 'sends', kind: 'triggers' },
+  { test: /^(render|mount|paint|draw)/i, verb: 'renders', kind: 'custom' },
+];
+
+function verbForCall(name: string): { verb: string; kind: MapEdge['kind'] } {
+  // `ns.doThing()` reads the same as `doThing()`.
+  const base = name.includes('.') ? name.slice(name.indexOf('.') + 1) : name;
+  for (const v of CALL_VERBS) if (v.test.test(base)) return { verb: v.verb, kind: v.kind };
+  return { verb: 'calls', kind: 'uses' };
+}
+
+/**
+ * The edges one pair of nodes deserves.
+ *
+ * A pair used to collapse into a single edge labelled from the target's folder name. Now it
+ * produces one edge per *verb the calls actually show* — reading and writing between the
+ * same two nodes are different facts, and are drawn as different edges — plus a single
+ * `imports` edge when the pair only imports and never calls. Each edge counts the call
+ * sites behind its own verb and carries its own citations.
+ */
+function edgesForPair(sourceKey: string, targetKey: string, links: PairLinks): ProposedEdge[] {
+  const out: ProposedEdge[] = [];
+  const buckets = new Map<string, { verb: string; kind: MapEdge['kind']; sites: { path: string; line: number }[] }>();
+  for (const call of links.calls) {
+    const { verb, kind } = verbForCall(call.symbol);
+    const bucket = buckets.get(verb) ?? { verb, kind, sites: [] };
+    bucket.sites.push({ path: call.path, line: call.line });
+    buckets.set(verb, bucket);
+  }
+  // Most-used verb first, then alphabetical — so the same repo always lays out the same.
+  const ordered = [...buckets.values()].sort(
+    (a, b) => b.sites.length - a.sites.length || a.verb.localeCompare(b.verb),
+  );
+  for (const bucket of ordered) {
+    out.push({
+      sourceKey,
+      targetKey,
+      label: bucket.verb,
+      kind: bucket.kind,
+      origin: 'verified',
+      weight: bucket.sites.length,
+      callSites: bucket.sites.length,
+      evidence: sampleEvidence(bucket.sites),
+      confidence: edgeConfidence('verified', bucket.sites.length),
+    });
+  }
+  if (!ordered.length && links.importSites.length) {
+    // Imported, never called: the link is real, but nothing shows what it is for yet.
+    out.push({
+      sourceKey,
+      targetKey,
+      label: 'imports',
+      kind: 'depends',
+      origin: 'verified',
+      weight: links.importSites.length,
+      callSites: links.importSites.length,
+      evidence: sampleEvidence(links.importSites),
+      confidence: edgeConfidence('verified', links.importSites.length),
+    });
+  }
+  return out;
 }
 
 /**
@@ -823,36 +902,27 @@ export function proposeMap(facts: RepoFacts): ProposedMap {
     }
   }
 
-  /* edges between areas, from real import links */
-  const pairCounts = new Map<string, LinkSites>();
+  /* edges between areas: what the code actually does between them */
+  const areaLinks = new Map<string, PairLinks>();
   for (const plan of plans) {
     for (const f of plan.files) {
       for (const imp of f.imports) {
         if (!imp.resolved) continue;
         const other = areaByFile.get(imp.resolved);
         if (!other || other === plan.key) continue;
-        addSite(pairCounts, `${plan.key}\u0000${other}`, f.path, imp.line);
+        addImportSite(areaLinks, `${plan.key}\u0000${other}`, f.path, imp.line);
       }
     }
   }
-  for (const [k, rec] of pairCounts) {
+  for (const call of facts.calls) {
+    const from = areaByFile.get(call.from);
+    const to = areaByFile.get(call.to);
+    if (!from || !to || from === to) continue;
+    addCallSite(areaLinks, `${from}\u0000${to}`, call.symbol, call.from, call.line);
+  }
+  for (const [k, links] of areaLinks) {
     const [sourceKey, targetKey] = k.split('\u0000');
-    const targetSegment = plans.find((p) => p.key === targetKey)?.segment ?? '';
-    const { label, kind } = edgeSemantics(targetKey, targetSegment, labelOf);
-    edges.push({
-      sourceKey,
-      targetKey,
-      label,
-      kind,
-      // Everything the mapper emits comes from a resolved import or a package the code
-      // really imports, so the *link* is verified even where the verb is still a guess
-      // from the target's name (call extraction replaces that; see §4.2).
-      origin: 'verified',
-      weight: rec.count,
-      callSites: rec.count,
-      evidence: sampleEvidence(rec.sites),
-      confidence: edgeConfidence('verified', rec.count),
-    });
+    edges.push(...edgesForPair(sourceKey, targetKey, links));
   }
 
   /* edges between siblings at every depth */
@@ -865,7 +935,7 @@ export function proposeMap(facts: RepoFacts): ProposedMap {
   for (const [, siblings] of byParent) {
     const owner = new Map<string, ProposedNode>();
     for (const s of siblings) for (const f of s.files) owner.set(f, s);
-    const pairWeights = new Map<string, LinkSites>();
+    const pairLinks = new Map<string, PairLinks>();
     for (const s of siblings) {
       for (const f of s.files) {
         const ff = fileIndex.get(f);
@@ -874,53 +944,32 @@ export function proposeMap(facts: RepoFacts): ProposedMap {
           if (!imp.resolved) continue;
           const other = owner.get(imp.resolved);
           if (!other || other.key === s.key) continue;
-          addSite(pairWeights, `${s.key}\u0000${other.key}`, f, imp.line);
+          addImportSite(pairLinks, `${s.key}\u0000${other.key}`, f, imp.line);
         }
       }
     }
-    for (const [k, rec] of pairWeights) {
+    for (const call of facts.calls) {
+      // Both ends must be siblings in *this* group. Falling back to a node anywhere in the
+      // map would mint an edge whose ends live in different branches — an edge no view can
+      // ever show, because a view only draws edges between the nodes it is showing.
+      const from = owner.get(call.from);
+      const to = owner.get(call.to);
+      if (!from || !to || from.key === to.key) continue;
+      addCallSite(pairLinks, `${from.key}\u0000${to.key}`, call.symbol, call.from, call.line);
+    }
+    for (const [k, links] of pairLinks) {
       const [sourceKey, targetKey] = k.split('\u0000');
-      const { label, kind } = edgeSemantics(targetKey, '', labelOf);
-      const exists = edges.some((e) => e.sourceKey === sourceKey && e.targetKey === targetKey);
-      if (exists) continue;
-      edges.push({
-        sourceKey,
-        targetKey,
-        label,
-        kind,
-        origin: 'verified',
-        weight: rec.count,
-        callSites: rec.count,
-        evidence: sampleEvidence(rec.sites),
-        confidence: edgeConfidence('verified', rec.count),
-      });
+      for (const edge of edgesForPair(sourceKey, targetKey, links)) {
+        const exists = edges.some(
+          (e) => e.sourceKey === edge.sourceKey && e.targetKey === edge.targetKey && e.label === edge.label,
+        );
+        if (!exists) edges.push(edge);
+      }
     }
   }
 
   layoutLevels(nodes, edges);
   return { nodes, edges };
-}
-
-/**
- * A first guess at what an edge *means*, from the target's name.
- *
- * This is the part the revamp replaces: a verb read off a directory name is frequently
- * wrong (see §4.2). Until call extraction lands, the guess stays — but it no longer
- * decides `origin`. Where a link came from is a fact about the code, and the mapper
- * knows it (a resolved import), so every edge it emits is `verified` with a citation.
- */
-function edgeSemantics(
-  targetKey: string,
-  targetSegment: string,
-  labelOf: Map<string, string>,
-): { label: string; kind: MapEdge['kind'] } {
-  if (targetKey.startsWith('ext:')) return { label: 'uses', kind: 'uses' };
-  const seg = (targetSegment || labelOf.get(targetKey) || '').toLowerCase();
-  if (/^(db|data|persistence|storage|schema|model)/.test(seg)) return { label: 'reads and writes', kind: 'stores' };
-  if (/^(api|server|http|route|endpoint|handler|controller)/.test(seg)) return { label: 'calls', kind: 'data' };
-  if (/^(notification|worker|job|queue|email)/.test(seg)) return { label: 'hands work to', kind: 'triggers' };
-  if (/^(web|frontend|ui|view|page|component|client)/.test(seg)) return { label: 'is rendered by', kind: 'custom' };
-  return { label: 'depends on', kind: 'depends' };
 }
 
 function areaDetail(files: FileFacts[]): string {

@@ -18,6 +18,11 @@
  *   drawn by the developer, or planned on purpose           1.00
  *     (the map is not guessing at all there — it is recording a decision. `origin`
  *      still says it is not code, which is the distinction that matters on screen.)
+ *
+ * The `documented` branch has no caller yet: reading a README for "X talks to Y" without
+ * inventing relationships needs either a model (as a proposal) or a rule strict enough to
+ * be worth having, and neither exists in the engine today. The rule is here so that when
+ * one does, the number it produces is already agreed.
  */
 import type { Provenance } from '../types.ts';
 

@@ -4,7 +4,7 @@
  */
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { FileFacts, RepoFacts } from '../types.ts';
+import type { CallFact, FileFacts, RepoFacts } from '../types.ts';
 import { CODE_LANGS, scanRepo, type ScanOptions, type ScannedFile } from './scan.ts';
 import { analyzeTsJs, buildPathIndex, isTsJs } from './tsjs.ts';
 import { analyzePython } from './py.ts';
@@ -107,6 +107,7 @@ export async function analyzeRepo(root: string, opts: ScanOptions = {}): Promise
   return {
     root: abs,
     files,
+    calls: resolveCalls(files),
     externals,
     entryPoints: files.filter((f) => f.isEntry).map((f) => f.path),
     totals: {
@@ -119,3 +120,43 @@ export async function analyzeRepo(root: string, opts: ScanOptions = {}): Promise
 }
 
 export type { ScannedFile };
+
+/** How many calls between the same two files are worth keeping — the verb needs a name, not a census. */
+const MAX_CALLS_PER_PAIR = 6;
+
+/**
+ * Cross-file resolution: a call names a symbol, and the symbol is looked up in the module
+ * the caller imported it from. That is what turns "this file imports that one" into "this
+ * file *calls* `insertOrder` there, on line 12".
+ *
+ * Only exported definitions count — a call cannot reach what a module does not export — and
+ * a call whose target file cannot be found is dropped, because a verb derived from a name
+ * that resolves nowhere would be a guess dressed up as a fact.
+ */
+function resolveCalls(files: FileFacts[]): CallFact[] {
+  const byPath = new Map(files.map((f) => [f.path, f]));
+  const perPair = new Map<string, number>();
+  const out: CallFact[] = [];
+  for (const file of files) {
+    for (const call of file.calls) {
+      if (!call.from || call.from === file.path) continue;
+      const target = byPath.get(call.from);
+      if (!target) continue;
+      const defined = target.symbols.some((s) => s.name === call.name) || target.exports.includes(call.name);
+      if (!defined) continue;
+      const pair = `${file.path}\u0000${target.path}`;
+      const seen = perPair.get(pair) ?? 0;
+      if (seen >= MAX_CALLS_PER_PAIR) continue;
+      perPair.set(pair, seen + 1);
+      out.push({
+        from: file.path,
+        to: target.path,
+        symbol: call.name,
+        line: call.line,
+        ...(call.textual ? { textual: true } : {}),
+      });
+    }
+  }
+  return out;
+}
+

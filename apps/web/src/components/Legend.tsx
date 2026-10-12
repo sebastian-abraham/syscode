@@ -64,7 +64,7 @@ export default function Legend() {
 
       {open && (
         <div className="legend__body">
-          <div className="legend__group">An edge is</div>
+          <div className="legend__group">Line colour — the kind of link</div>
           <ul className="legend__grid">
             {EDGE_KINDS.map((kind: EdgeKind) => (
               <li key={kind} className="legend__row">

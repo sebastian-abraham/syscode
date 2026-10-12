@@ -2,9 +2,12 @@
  * Python analysis. Line-oriented rather than a full AST: we need imports,
  * top-level defs/classes and their ranges, which is exactly what indentation gives us.
  */
-import type { FileFacts, ImportFact, SymbolFact } from '../types.ts';
+import type { CallRef, FileFacts, ImportFact, SymbolFact } from '../types.ts';
 import { countLoc, hashText, type ScannedFile } from './scan.ts';
 import { packageOf } from './tsjs.ts';
+
+/** Per file. Mirrors the TypeScript pass; the ceiling keeps a dispatcher from flooding the map. */
+const MAX_CALLS = 60;
 
 const DEF_RE = /^(\s*)(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/;
 const CLASS_RE = /^(\s*)(?:@[\w.]+\(?[^)]*\)?\s*)?class\s+([A-Za-z_][A-Za-z0-9_]*)/;
@@ -26,26 +29,35 @@ export function analyzePython(file: ScannedFile, index: Map<string, string>): Fi
   const imports: ImportFact[] = [];
   const symbols: SymbolFact[] = [];
   const exports: string[] = [];
+  /** Local name → the module it came from. */
+  const bindings = new Map<string, { resolved?: string }>();
 
-  const addImport = (spec: string, line: number) => {
+  const addImport = (spec: string, line: number, local?: string) => {
     const root = spec.split('.')[0];
     const pkg = packageOf(root) ?? root;
-    const local = findLocal(spec, file.path, index);
-    imports.push({ specifier: spec, resolved: local, external: !local, package: local ? undefined : pkg, line });
+    const localPath = findLocal(spec, file.path, index);
+    imports.push({ specifier: spec, resolved: localPath, external: !localPath, package: localPath ? undefined : pkg, line });
+    const bound = local ?? root;
+    if (bound) bindings.set(bound, { resolved: localPath });
   };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const from = FROM_RE.exec(line);
     if (from) {
-      addImport(from[1], i + 1);
+      // `from pkg.mod import a, b as c` — each imported name is a binding of that module.
+      for (const part of from[2].split(',')) {
+        const name = part.trim().split(/\s+as\s+/).pop()?.trim();
+        if (name) addImport(from[1], i + 1, name);
+      }
       continue;
     }
     const imp = IMPORT_RE.exec(line);
     if (imp) {
       for (const part of imp[1].split(',')) {
-        const name = part.trim().split(/\s+as\s+/)[0].trim();
-        if (name) addImport(name, i + 1);
+        const bits = part.trim().split(/\s+as\s+/);
+        const name = bits[bits.length - 1].trim();
+        if (name) addImport(bits[0].trim(), i + 1, name);
       }
       continue;
     }
@@ -68,6 +80,30 @@ export function analyzePython(file: ScannedFile, index: Map<string, string>): Fi
     }
   }
 
+  // Call sites, matched textually: a bound name followed by `(`. Line-oriented, like the
+  // rest of this file — so it can be fooled by a name inside a string or a comment, which
+  // is exactly why each fact carries `textual: true` instead of pretending to the fidelity
+  // the TypeScript pass has.
+  const localNames = new Set(symbols.map((s) => s.name));
+  const found: CallRef[] = [];
+  for (const name of [...new Set([...bindings.keys(), ...localNames])]) {
+    const re = new RegExp(`\\b${escapeRe(name)}\\s*\\(`);
+    for (let i = 0; i < lines.length; i++) {
+      const text = lines[i];
+      if (DEF_RE.test(text) || CLASS_RE.test(text) || IMPORT_RE.test(text) || FROM_RE.test(text)) continue;
+      if (!re.test(text.replace(/#.*$/, ''))) continue;
+      const bound = bindings.get(name);
+      found.push(bound ? { name, line: i + 1, from: bound.resolved, textual: true } : { name, line: i + 1, textual: true });
+      break;
+    }
+  }
+  found.sort((a, b) => a.line - b.line || a.name.localeCompare(b.name));
+  const calls = found.slice(0, MAX_CALLS);
+  for (const s of symbols) {
+    const mine = calls.filter((c) => c.line >= s.line && c.line <= s.endLine);
+    if (mine.length) s.calls = mine;
+  }
+
   return {
     path: file.path,
     lang: 'python',
@@ -77,7 +113,12 @@ export function analyzePython(file: ScannedFile, index: Map<string, string>): Fi
     imports,
     symbols,
     exports,
+    calls,
   };
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function endOfBlock(lines: string[], startIdx: number, indent: number): number {

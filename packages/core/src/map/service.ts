@@ -147,7 +147,7 @@ export class MapService {
       const source = idByKey.get(e.sourceKey);
       const target = idByKey.get(e.targetKey);
       if (!source || !target || source === target) continue;
-      const duplicate = this.store.allEdges().some((x) => x.source === source && x.target === target && x.origin !== 'user');
+      const duplicate = this.store.allEdges().some((x) => x.source === source && x.target === target && x.label === e.label && x.origin !== 'user');
       if (duplicate) continue;
       this.store.insertEdge({
         id: newId('e'),
