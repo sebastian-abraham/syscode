@@ -16,7 +16,8 @@ import type { MapView, MapNode, MapEdge, Proposal, ProjectInfo, ScopedContext, C
 `GET /api/map?parent=<nodeId|root>` → `MapView` — siblings of `parent` (default: level 0), their edges, breadcrumb, and `purpose`: one sentence saying what this system is, for the headline on the canvas (the mapping pass's opening sentence when memory exists, else composed from the facts; `null` when there is nothing honest to say).
 `GET /api/node/:id` → `MapNode` (with `anchors`, `notes`, `childCount`)
 `GET /api/node/:id/context` → `ScopedContext` — exactly what the agent would be given for that node.
-`GET /api/node/:id/code?anchor=<idx>` → `{ path, start, end, text, highlight }` — file slice for the code peek.
+`GET /api/node/:id/code?anchor=<idx>` → `{ path, start, end, text, highlight, totalLines, symbol? }` — file slice for the code peek. `totalLines` is the whole file's length, so the peek can say where in the file you are; `symbol` names the anchor's symbol when it has one.
+`GET /api/code?path=<repo-relative>&line=<n>` → the same shape — a slice of any file in the project, for a citation that is not a node anchor (an edge's `evidence`). Any path outside the project is refused with 404.
 `GET /api/node/:id/descendants` → `{ nodes: MapNode[]; edges: MapEdge[] }` — every level under a node, for the "whole subtree" view.
 `POST /api/node` `{ label, summary, parentId, kind?, position? }` → `MapNode` (user-authored node)
 `PATCH /api/node/:id` `{ label?, summary?, detail?, position?, kind?, positionLocked?, labelLocked? }` → `MapNode`
@@ -65,6 +66,20 @@ After any of these the engine emits `{type:'project-changed'}` on `/api/events`;
 - `raw` carries what the model actually said when parsing failed, for diagnosis.
 
 Static assets are served from the same origin at `/`.
+
+## Fields the payloads carry
+
+Beyond the shapes in `types.ts`, these are the fields the interface reads and the engine
+must keep filling:
+
+- `MapView.truncated` — true when the level holds more siblings than the view cap shows.
+- `MapView.purpose` — the one-sentence headline (see `GET /api/map` above).
+- `MapEdge.evidence` — `{ path, line, snippet? }[]`: the lines the link was actually found
+  on. An edge whose `origin` is `verified` must carry at least one, or the interface is
+  showing a claim it cannot back.
+- `MapEdge.confidence` — 0..1, computed from the facts by `packages/core/src/map/confidence.ts`.
+  Never asked of a model: the same facts must give the same number.
+- `MapEdge.callSites` — how many code-level links this one edge stands for.
 
 ## Product rules the UI must express
 

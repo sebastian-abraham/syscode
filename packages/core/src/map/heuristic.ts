@@ -13,6 +13,7 @@
  */
 import type { Anchor, FileFacts, MapEdge, NodeKind, Provenance, RepoFacts, SymbolFact } from '../types.ts';
 import { serviceLabel } from '../analyze/external.ts';
+import { edgeConfidence } from './confidence.ts';
 
 const MAX_AREAS = 8;
 const MAX_CHILDREN = 6;
@@ -44,6 +45,44 @@ export interface ProposedEdge {
   kind: MapEdge['kind'];
   origin: Provenance;
   weight: number;
+  /** A few real `file:line` sites behind the link, for the interface to show. */
+  evidence?: { path: string; line: number }[];
+  confidence?: number;
+  callSites?: number;
+}
+
+/** Links found between one pair of nodes, with the citations behind them. */
+interface LinkSites {
+  count: number;
+  sites: { path: string; line: number }[];
+}
+
+function addSite(into: Map<string, LinkSites>, key: string, path: string, line: number | undefined): void {
+  const rec = into.get(key) ?? { count: 0, sites: [] };
+  rec.count += 1;
+  if (line !== undefined) rec.sites.push({ path, line });
+  into.set(key, rec);
+}
+
+/**
+ * The citations an edge carries. A handful, not all of them: an edge standing for forty
+ * imports does not need forty lines to be believable, and the count is carried separately.
+ * Sorted, so the same repo always produces the same evidence — a diff that changes for no
+ * reason is a diff nobody reads.
+ */
+const MAX_EVIDENCE = 3;
+
+function sampleEvidence(sites: { path: string; line: number }[]): { path: string; line: number }[] {
+  const seen = new Set<string>();
+  const out: { path: string; line: number }[] = [];
+  for (const s of [...sites].sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line)) {
+    const k = `${s.path}:${s.line}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(s);
+    if (out.length >= MAX_EVIDENCE) break;
+  }
+  return out;
 }
 
 export interface ProposedMap {
@@ -763,28 +802,57 @@ export function proposeMap(facts: RepoFacts): ProposedMap {
     externalNodes.set(key, node);
     nodes.push(node);
     for (const areaKey of userAreaKeys) {
-      edges.push({ sourceKey: areaKey, targetKey: key, label: 'uses', kind: 'uses', origin: 'verified', weight: 1 });
+      const sites = users
+        .filter((f) => areaByFile.get(f.path) === areaKey)
+        .flatMap((f) =>
+          f.imports
+            .filter((i) => i.package === ext.name && i.line !== undefined)
+            .map((i) => ({ path: f.path, line: i.line as number })),
+        );
+      edges.push({
+        sourceKey: areaKey,
+        targetKey: key,
+        label: 'uses',
+        kind: 'uses',
+        origin: 'verified',
+        weight: Math.max(1, sites.length),
+        callSites: Math.max(1, sites.length),
+        evidence: sampleEvidence(sites),
+        confidence: edgeConfidence('verified', sites.length),
+      });
     }
   }
 
   /* edges between areas, from real import links */
-  const pairCounts = new Map<string, number>();
+  const pairCounts = new Map<string, LinkSites>();
   for (const plan of plans) {
     for (const f of plan.files) {
       for (const imp of f.imports) {
         if (!imp.resolved) continue;
         const other = areaByFile.get(imp.resolved);
         if (!other || other === plan.key) continue;
-        const k = `${plan.key}\u0000${other}`;
-        pairCounts.set(k, (pairCounts.get(k) ?? 0) + 1);
+        addSite(pairCounts, `${plan.key}\u0000${other}`, f.path, imp.line);
       }
     }
   }
-  for (const [k, weight] of pairCounts) {
+  for (const [k, rec] of pairCounts) {
     const [sourceKey, targetKey] = k.split('\u0000');
     const targetSegment = plans.find((p) => p.key === targetKey)?.segment ?? '';
-    const { label, kind, origin } = edgeSemantics(targetKey, targetSegment, labelOf);
-    edges.push({ sourceKey, targetKey, label, kind, origin, weight });
+    const { label, kind } = edgeSemantics(targetKey, targetSegment, labelOf);
+    edges.push({
+      sourceKey,
+      targetKey,
+      label,
+      kind,
+      // Everything the mapper emits comes from a resolved import or a package the code
+      // really imports, so the *link* is verified even where the verb is still a guess
+      // from the target's name (call extraction replaces that; see §4.2).
+      origin: 'verified',
+      weight: rec.count,
+      callSites: rec.count,
+      evidence: sampleEvidence(rec.sites),
+      confidence: edgeConfidence('verified', rec.count),
+    });
   }
 
   /* edges between siblings at every depth */
@@ -797,7 +865,7 @@ export function proposeMap(facts: RepoFacts): ProposedMap {
   for (const [, siblings] of byParent) {
     const owner = new Map<string, ProposedNode>();
     for (const s of siblings) for (const f of s.files) owner.set(f, s);
-    const pairWeights = new Map<string, number>();
+    const pairWeights = new Map<string, LinkSites>();
     for (const s of siblings) {
       for (const f of s.files) {
         const ff = fileIndex.get(f);
@@ -806,16 +874,26 @@ export function proposeMap(facts: RepoFacts): ProposedMap {
           if (!imp.resolved) continue;
           const other = owner.get(imp.resolved);
           if (!other || other.key === s.key) continue;
-          const k = `${s.key}\u0000${other.key}`;
-          pairWeights.set(k, (pairWeights.get(k) ?? 0) + 1);
+          addSite(pairWeights, `${s.key}\u0000${other.key}`, f, imp.line);
         }
       }
     }
-    for (const [k, weight] of pairWeights) {
+    for (const [k, rec] of pairWeights) {
       const [sourceKey, targetKey] = k.split('\u0000');
-      const { label, kind, origin } = edgeSemantics(targetKey, '', labelOf);
+      const { label, kind } = edgeSemantics(targetKey, '', labelOf);
       const exists = edges.some((e) => e.sourceKey === sourceKey && e.targetKey === targetKey);
-      if (!exists) edges.push({ sourceKey, targetKey, label, kind, origin, weight });
+      if (exists) continue;
+      edges.push({
+        sourceKey,
+        targetKey,
+        label,
+        kind,
+        origin: 'verified',
+        weight: rec.count,
+        callSites: rec.count,
+        evidence: sampleEvidence(rec.sites),
+        confidence: edgeConfidence('verified', rec.count),
+      });
     }
   }
 
@@ -823,18 +901,26 @@ export function proposeMap(facts: RepoFacts): ProposedMap {
   return { nodes, edges };
 }
 
+/**
+ * A first guess at what an edge *means*, from the target's name.
+ *
+ * This is the part the revamp replaces: a verb read off a directory name is frequently
+ * wrong (see §4.2). Until call extraction lands, the guess stays — but it no longer
+ * decides `origin`. Where a link came from is a fact about the code, and the mapper
+ * knows it (a resolved import), so every edge it emits is `verified` with a citation.
+ */
 function edgeSemantics(
   targetKey: string,
   targetSegment: string,
   labelOf: Map<string, string>,
-): { label: string; kind: MapEdge['kind']; origin: Provenance } {
-  if (targetKey.startsWith('ext:')) return { label: 'uses', kind: 'uses', origin: 'verified' };
+): { label: string; kind: MapEdge['kind'] } {
+  if (targetKey.startsWith('ext:')) return { label: 'uses', kind: 'uses' };
   const seg = (targetSegment || labelOf.get(targetKey) || '').toLowerCase();
-  if (/^(db|data|persistence|storage|schema|model)/.test(seg)) return { label: 'reads and writes', kind: 'stores', origin: 'verified' };
-  if (/^(api|server|http|route|endpoint|handler|controller)/.test(seg)) return { label: 'calls', kind: 'data', origin: 'inferred' };
-  if (/^(notification|worker|job|queue|email)/.test(seg)) return { label: 'hands work to', kind: 'triggers', origin: 'inferred' };
-  if (/^(web|frontend|ui|view|page|component|client)/.test(seg)) return { label: 'is rendered by', kind: 'custom', origin: 'inferred' };
-  return { label: 'depends on', kind: 'depends', origin: 'verified' };
+  if (/^(db|data|persistence|storage|schema|model)/.test(seg)) return { label: 'reads and writes', kind: 'stores' };
+  if (/^(api|server|http|route|endpoint|handler|controller)/.test(seg)) return { label: 'calls', kind: 'data' };
+  if (/^(notification|worker|job|queue|email)/.test(seg)) return { label: 'hands work to', kind: 'triggers' };
+  if (/^(web|frontend|ui|view|page|component|client)/.test(seg)) return { label: 'is rendered by', kind: 'custom' };
+  return { label: 'depends on', kind: 'depends' };
 }
 
 function areaDetail(files: FileFacts[]): string {

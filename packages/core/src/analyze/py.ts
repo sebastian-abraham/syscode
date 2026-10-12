@@ -27,25 +27,25 @@ export function analyzePython(file: ScannedFile, index: Map<string, string>): Fi
   const symbols: SymbolFact[] = [];
   const exports: string[] = [];
 
-  const addImport = (spec: string) => {
+  const addImport = (spec: string, line: number) => {
     const root = spec.split('.')[0];
     const pkg = packageOf(root) ?? root;
     const local = findLocal(spec, file.path, index);
-    imports.push({ specifier: spec, resolved: local, external: !local, package: local ? undefined : pkg });
+    imports.push({ specifier: spec, resolved: local, external: !local, package: local ? undefined : pkg, line });
   };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const from = FROM_RE.exec(line);
     if (from) {
-      addImport(from[1]);
+      addImport(from[1], i + 1);
       continue;
     }
     const imp = IMPORT_RE.exec(line);
     if (imp) {
       for (const part of imp[1].split(',')) {
         const name = part.trim().split(/\s+as\s+/)[0].trim();
-        if (name) addImport(name);
+        if (name) addImport(name, i + 1);
       }
       continue;
     }

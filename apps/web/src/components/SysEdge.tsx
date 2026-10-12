@@ -7,6 +7,7 @@ import {
   type EdgeProps,
 } from '@xyflow/react';
 import type { MapEdge } from '../types.ts';
+import { edgeTitle } from '../edgeStyle.ts';
 
 /**
  * What the canvas hands an edge: the model edge, plus what the *current* view says
@@ -81,6 +82,8 @@ export default function SysEdge({
         <EdgeLabelRenderer>
           <div
             className={classes}
+            // What the edge is, how sure the map is, and the lines it was found on.
+            title={edgeTitle(edge)}
             style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
           >
             {edge.label}

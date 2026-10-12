@@ -151,6 +151,8 @@ export interface StoreValue {
 
   // code peek
   openCodePeek: (node: MapNode, anchorIndex: number) => Promise<void>;
+  /** Open a citation that is not one of the selected node's anchors (edge evidence). */
+  openCodeAt: (path: string, line: number, label: string) => Promise<void>;
   closeCodePeek: () => void;
 
   // approvals + refresh
@@ -869,6 +871,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const closeCodePeek = useCallback(() => setCodePeek(null), []);
 
+  /**
+   * Open a citation that is not one of the selected node's anchors — an edge's evidence is
+   * a line in the *source* file, which is frequently not anchored on any node, so the
+   * node-scoped peek cannot reach it.
+   */
+  const openCodeAt = useCallback(
+    async (path: string, line: number, label: string) => {
+      try {
+        const slice = await api.code(path, line);
+        setCodePeek({ nodeId: '', nodeLabel: label, slice });
+      } catch (err) {
+        toast('error', `Could not read ${path}:${line} — ${messageFromError(err)}`);
+      }
+    },
+    [toast],
+  );
+
   // -------------------------------------------------------------------------
   // Refresh + approvals
   // -------------------------------------------------------------------------
@@ -1155,6 +1174,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       addNote,
       deleteNote,
       openCodePeek,
+      openCodeAt,
       closeCodePeek,
       refresh,
       closeRefreshReport,
@@ -1235,6 +1255,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       addNote,
       deleteNote,
       openCodePeek,
+      openCodeAt,
       closeCodePeek,
       refresh,
       closeRefreshReport,

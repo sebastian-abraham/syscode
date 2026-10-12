@@ -68,8 +68,8 @@ export function analyzeTsJs(file: ScannedFile, index: Map<string, string>): File
       resolved: resolveSpecifier(file.path, spec, index),
       external: Boolean(pkg),
       package: pkg,
+      line: lineOf(node.getStart(sf)),
     });
-    void node;
   };
 
   const collectBindingNames = (name: ts.BindingName | undefined, into: Set<string>) => {

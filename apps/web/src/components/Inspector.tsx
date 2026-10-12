@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useStore, type InspectorTab } from '../store.tsx';
-import type { MapNode, Note } from '../types.ts';
+import type { MapEdge, MapNode, MapView, Note } from '../types.ts';
+import { confidenceLabel } from '../edgeStyle.ts';
 import ContextPanel from './ContextPanel.tsx';
 import { IconChevron, IconCode, IconLock, IconTag, IconX } from './icons.tsx';
 
@@ -33,16 +34,48 @@ function fmtTime(iso: string): string {
   });
 }
 
+/** One of a node's edges, with the end that is not this node. */
+type Connection = { edge: MapEdge; direction: 'out' | 'in'; other: MapNode };
+
+/** How many the panel lists before it stops being readable. */
+const MAX_CONNECTIONS = 8;
+
+/**
+ * A node's relationships *at this level*: the view's edges are the ones between the nodes
+ * on screen, so this is what the canvas is showing, not the whole subtree.
+ * Strongest first — what the map is surest about is what you should read first.
+ */
+function connectionsOf(node: MapNode, view: MapView | null): Connection[] {
+  if (!view) return [];
+  const byId = new Map(view.nodes.map((n) => [n.id, n]));
+  const out: Connection[] = [];
+  for (const edge of view.edges) {
+    if (edge.source === node.id) {
+      const other = byId.get(edge.target);
+      if (other) out.push({ edge, direction: 'out', other });
+    } else if (edge.target === node.id) {
+      const other = byId.get(edge.source);
+      if (other) out.push({ edge, direction: 'in', other });
+    }
+  }
+  return out.sort(
+    (a, b) =>
+      (b.edge.confidence ?? 0) - (a.edge.confidence ?? 0) || a.other.label.localeCompare(b.other.label),
+  );
+}
+
 export default function Inspector() {
   const {
     selected,
     selectedContext,
+    view,
     journal,
     inspectorTab,
     setInspectorTab,
     clearSelection,
     loadContext,
     openCodePeek,
+    openCodeAt,
     drillInto,
     addNote,
     deleteNote,
@@ -99,7 +132,9 @@ export default function Inspector() {
         {active === 'overview' && selected && (
           <Overview
             node={selected}
+            connections={connectionsOf(selected, view)}
             onAnchor={(i) => void openCodePeek(selected, i)}
+            onEvidence={(path, line, label) => void openCodeAt(path, line, label)}
             onOpenChildren={() => void drillInto(selected.id)}
             onRefine={() => void openRefine(selected.id)}
           />
@@ -128,12 +163,16 @@ export default function Inspector() {
 
 function Overview({
   node,
+  connections,
   onAnchor,
+  onEvidence,
   onOpenChildren,
   onRefine,
 }: {
   node: MapNode;
+  connections: Connection[];
   onAnchor: (index: number) => void;
+  onEvidence: (path: string, line: number, label: string) => void;
   onOpenChildren: () => void;
   onRefine: () => void;
 }) {
@@ -184,6 +223,73 @@ function Overview({
               <span className="chip chip--quiet">
                 <IconTag size={11} /> label protected
               </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* What this node links to, and the line each link was found on. This is the part
+          gitdiagram cannot do: its edges are uncheckable claims. */}
+      {connections.length > 0 && (
+        <div className="field">
+          <div className="field__label">
+            Connections — {connections.length} at this level
+          </div>
+          <div className="conn">
+            {connections.slice(0, MAX_CONNECTIONS).map(({ edge, direction, other }) => (
+              <div className="conn__row" key={edge.id}>
+                <div className="conn__head">
+                  <span className={`conn__dir conn__dir--${direction}`}>
+                    {direction === 'out' ? 'out' : 'in'}
+                  </span>
+                  <span className="conn__verb">{edge.label}</span>
+                  <span className="conn__other" title={other.label}>
+                    {other.label}
+                  </span>
+                </div>
+                <div className="conn__meta">
+                  <span className={`chip chip--${edge.origin}`}>
+                    <span className="chip__dot" />
+                    {ORIGIN_LABEL[edge.origin]}
+                  </span>
+                  <span className="chip chip--quiet">{edge.kind}</span>
+                  {edge.confidence !== undefined && (
+                    <span className="conn__conf" title={confidenceLabel(edge.confidence)}>
+                      {Math.round(edge.confidence * 100)}%
+                    </span>
+                  )}
+                  {edge.callSites !== undefined && edge.callSites > 1 && (
+                    <span className="chip chip--quiet">{edge.callSites} links</span>
+                  )}
+                </div>
+                {edge.evidence?.length ? (
+                  <div className="conn__evidence">
+                    {edge.evidence.map((ev) => (
+                      <button
+                        key={`${ev.path}:${ev.line}`}
+                        type="button"
+                        className="anchor-row"
+                        onClick={() => onEvidence(ev.path, ev.line, `${edge.label} — ${ev.path}`)}
+                        title={`Open ${ev.path}:${ev.line}`}
+                      >
+                        <IconCode size={12} />
+                        <span className="anchor-row__path">
+                          {ev.path}:{ev.line}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="conn__none">
+                    no citation — {ORIGIN_LABEL[edge.origin].toLowerCase()}, so nothing to open
+                  </div>
+                )}
+              </div>
+            ))}
+            {connections.length > MAX_CONNECTIONS && (
+              <div className="conn__none">
+                {connections.length - MAX_CONNECTIONS} more at this level — the canvas shows them all.
+              </div>
             )}
           </div>
         </div>

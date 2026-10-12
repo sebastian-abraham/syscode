@@ -84,6 +84,21 @@ export interface MapEdge {
   origin: Provenance;
   /** How many underlying code-level links this edge summarises. */
   weight?: number;
+  /**
+   * Where this link was actually found. The whole honesty rule rests here: an edge that
+   * says `verified` must be able to show one of these, and the interface opens it as a
+   * code peek. Edges that are only claimed (drawn by the developer, or planned) have
+   * none, and must not pretend otherwise.
+   */
+  evidence?: { path: string; line: number; snippet?: string }[];
+  /**
+   * How sure the map is that this edge exists, 0..1. Computed from the facts by
+   * `map/confidence.ts` — never asked of the model, because a number a model made up
+   * cannot be reproduced and therefore cannot be trusted.
+   */
+  confidence?: number;
+  /** The honest name for `weight`: how many code-level links this one edge stands for. */
+  callSites?: number;
 }
 
 /** A view of the map: the siblings to draw plus their edges and breadcrumb. */
@@ -202,6 +217,8 @@ export interface ImportFact {
   resolved?: string;
   external: boolean;
   package?: string;
+  /** 1-based line of the import statement — the citation an edge carries. */
+  line?: number;
 }
 
 export interface SymbolFact {

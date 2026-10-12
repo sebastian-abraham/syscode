@@ -243,6 +243,14 @@ async function handleApi(
     json(res, 200, svc.view(parent && parent !== 'root' ? parent : null));
     return;
   }
+  // A slice of any file in the project, at a line: what an edge's citation opens. The
+  // node-scoped peek only reaches a node's own anchors, and an edge's evidence is a line
+  // in the source file, which is often not anchored on any node.
+  if (seg[0] === 'code') {
+    const peek = svc.codeSlice(String(query.get('path') ?? ''), Number(query.get('line') ?? 1));
+    json(res, peek ? 200 : 404, peek ?? { error: 'no such file inside this project' });
+    return;
+  }
   if (seg[0] === 'proposals') {
     if (seg.length === 1) {
       json(res, 200, svc.proposals());

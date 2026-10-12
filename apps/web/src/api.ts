@@ -151,6 +151,8 @@ export const api = {
   nodeContext: (id: string) => req<ScopedContext>(`/node/${enc(id)}/context`),
   nodeCode: (id: string, anchor: number) =>
     req<CodeSlice>(`/node/${enc(id)}/code?anchor=${anchor}`),
+  /** A slice of any file in the project, at a line — what an edge's citation opens. */
+  code: (path: string, line: number) => req<CodeSlice>(`/code?path=${enc(path)}&line=${line}`),
   descendants: (id: string) =>
     req<{ nodes: MapNode[]; edges: MapEdge[] }>(`/node/${enc(id)}/descendants`),
 

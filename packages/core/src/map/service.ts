@@ -13,6 +13,7 @@ import { serviceLabel } from '../analyze/external.ts';
 import { newId, Store, type StoredNode } from '../store/db.ts';
 import { proposeMap, type ProposedMap, type ProposedNode } from './heuristic.ts';
 import { applyReconcile, makeNode, reconcile } from './identity.ts';
+import { edgeConfidence } from './confidence.ts';
 import { brainInfo, loadConfig, resolveBrain, saveConfig, type Brain } from '../config.ts';
 import { buildContext, estimateTokens } from '../memory/context.ts';
 import { buildProjectMemory, projectPurpose } from '../memory/mapping.ts';
@@ -156,6 +157,10 @@ export class MapService {
         kind: e.kind,
         origin: e.origin,
         weight: e.weight,
+        // The citation the mapper found in the code, and the number it computed from it.
+        evidence: e.evidence,
+        confidence: e.confidence,
+        callSites: e.callSites,
       });
     }
   }
@@ -299,6 +304,36 @@ export class MapService {
     };
   }
 
+  /**
+   * A slice of any file inside the project, centred on a line — what an edge's citation
+   * opens. The node-scoped peek above only reaches a node's own anchors, and an edge's
+   * evidence is a line in the *source* file, which is frequently not anchored anywhere.
+   */
+  codeSlice(target: string, line = 1, windowLines = 60): CodePeek | undefined {
+    const rel = path.relative(this.root, path.resolve(this.root, target));
+    // This path arrives from the interface, so it is checked rather than trusted: a map is
+    // not a reason for the engine to be able to read anything on the machine.
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return undefined;
+    let raw: string;
+    try {
+      raw = readFileSync(path.join(this.root, rel), 'utf8');
+    } catch {
+      return undefined;
+    }
+    const lines = raw.split('\n');
+    const at = Math.max(1, Math.min(lines.length, Math.floor(line) || 1));
+    const start = Math.max(1, at - Math.floor(windowLines / 3));
+    const end = Math.min(lines.length, start + windowLines);
+    return {
+      path: rel,
+      start,
+      end,
+      totalLines: lines.length,
+      text: lines.slice(start - 1, end).join('\n'),
+      highlight: [at, at],
+    };
+  }
+
   /* ------------------------------------------------------------------ write */
 
   createNode(input: { label: string; summary: string; kind?: MapNode['kind']; parentId?: string | null; position?: { x: number; y: number }; detail?: string }): StoredNode {
@@ -375,6 +410,9 @@ export class MapService {
       kind: input.kind ?? 'custom',
       origin: 'user',
       weight: 1,
+      // The developer drew it, so the map is not guessing: certain that this is what they
+      // meant, and `origin` still says it did not come from the code.
+      confidence: edgeConfidence('user', 0),
     };
     this.store.insertEdge(edge);
     const a = this.store.getNode(input.source);
@@ -504,6 +542,13 @@ export class MapService {
           kind: op.edge.kind ?? 'custom',
           origin: op.edge.origin ?? 'inferred',
           weight: op.edge.weight ?? 1,
+          // A proposed edge is a claim, not a finding: unless the proposal came with a
+          // citation, its confidence is the inferred floor. Nothing here is guessed by a
+          // model — the number is derived from what the edge can point at.
+          evidence: op.edge.evidence,
+          confidence:
+            op.edge.confidence ?? edgeConfidence(op.edge.origin ?? 'inferred', op.edge.evidence?.length ?? 0),
+          callSites: op.edge.callSites,
         });
         break;
       case 'rename-node':

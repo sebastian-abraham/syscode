@@ -105,3 +105,35 @@ export function edgePathStyle(edge: MapEdge): CSSProperties {
     ...(dash ? { strokeDasharray: dash } : {}),
   } as CSSProperties;
 }
+
+/**
+ * Wording for a computed confidence. The number comes from the engine (map/confidence.ts);
+ * the sentence belongs to the interface, which is why it lives here and not there.
+ */
+export function confidenceLabel(confidence: number | undefined): string {
+  if (confidence === undefined) return 'confidence unstated';
+  if (confidence >= 0.9) return 'certain — found in the code';
+  if (confidence >= 0.6) return 'likely — matched by name or path';
+  if (confidence >= 0.45) return 'plausible — stated in the docs';
+  return 'a guess — nothing to point at';
+}
+
+/**
+ * What an edge says when you hover it: what it is, how sure the map is, and the lines it
+ * was found on. The citation is the point — an edge you cannot check is an edge you have
+ * to take on trust, which is exactly what this revamp is against.
+ */
+export function edgeTitle(edge: MapEdge): string {
+  const bits: string[] = [`${edge.label} · ${EDGE_ORIGIN_LABEL[edge.origin]} · ${confidenceLabel(edge.confidence)}`];
+  if (edge.callSites && edge.callSites > 1) bits.push(`${edge.callSites} links in the code`);
+  const evidence = edge.evidence ?? [];
+  bits.push(
+    evidence.length
+      ? evidence
+          .slice(0, 3)
+          .map((e) => `${e.path}:${e.line}`)
+          .join(', ')
+      : 'no citation recorded',
+  );
+  return bits.join(' · ');
+}

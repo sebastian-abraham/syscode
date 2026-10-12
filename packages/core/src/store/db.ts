@@ -41,7 +41,8 @@ create table if not exists notes (
 create table if not exists edges (
   id text primary key, source text not null, target text not null,
   label text not null, kind text not null, origin text not null default 'inferred',
-  weight integer not null default 1, created_at text not null
+  weight integer not null default 1, evidence text not null default '[]',
+  confidence real, call_sites integer, created_at text not null
 );
 create table if not exists proposals (
   id text primary key, title text not null, rationale text not null, ops text not null,
@@ -78,6 +79,17 @@ export function newId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
 }
 
+/** A JSON array column, read defensively: a malformed row must not take the map down. */
+function parseArray<T>(raw: unknown): T | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(String(raw));
+    return Array.isArray(parsed) ? (parsed as T) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class Store {
   readonly db: DatabaseSync;
   readonly root: string;
@@ -105,6 +117,19 @@ export class Store {
       this.db.exec('alter table chat add column session_id text');
     }
     this.db.exec('create index if not exists chat_session on chat(session_id)');
+
+    // Edges gained their citations (evidence / confidence / call_sites) after the first
+    // maps were written, so an existing database needs the columns added.
+    const edgeCols = this.db.prepare('pragma table_info(edges)').all() as { name: string }[];
+    if (!edgeCols.some((c) => c.name === 'evidence')) {
+      this.db.exec("alter table edges add column evidence text not null default '[]'");
+    }
+    if (!edgeCols.some((c) => c.name === 'confidence')) {
+      this.db.exec('alter table edges add column confidence real');
+    }
+    if (!edgeCols.some((c) => c.name === 'call_sites')) {
+      this.db.exec('alter table edges add column call_sites integer');
+    }
 
     // Messages that predate sessions (null/empty session_id) become one conversation, so
     // nothing the developer wrote is lost and the history keeps a sensible shape.
@@ -292,28 +317,61 @@ export class Store {
 
   allEdges(): MapEdge[] {
     const rows = this.db.prepare('select * from edges order by created_at').all() as Record<string, unknown>[];
-    return rows.map((r) => ({
-      id: String(r.id),
-      source: String(r.source),
-      target: String(r.target),
-      label: String(r.label),
-      kind: String(r.kind) as MapEdge['kind'],
-      origin: String(r.origin) as MapEdge['origin'],
-      weight: Number(r.weight ?? 1),
-    }));
+    return rows.map((r) => {
+      const evidence = parseArray<MapEdge['evidence']>(r.evidence);
+      const confidence = r.confidence === null || r.confidence === undefined ? undefined : Number(r.confidence);
+      const callSites = r.call_sites === null || r.call_sites === undefined ? undefined : Number(r.call_sites);
+      return {
+        id: String(r.id),
+        source: String(r.source),
+        target: String(r.target),
+        label: String(r.label),
+        kind: String(r.kind) as MapEdge['kind'],
+        origin: String(r.origin) as MapEdge['origin'],
+        weight: Number(r.weight ?? 1),
+        ...(evidence && evidence.length ? { evidence } : {}),
+        ...(confidence === undefined ? {} : { confidence }),
+        ...(callSites === undefined ? {} : { callSites }),
+      };
+    });
   }
 
   insertEdge(e: MapEdge): void {
-    this.db.prepare('insert or replace into edges (id, source, target, label, kind, origin, weight, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(e.id, e.source, e.target, e.label, e.kind, e.origin, e.weight ?? 1, now());
+    this.db.prepare(
+      'insert or replace into edges (id, source, target, label, kind, origin, weight, evidence, confidence, call_sites, created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(
+      e.id,
+      e.source,
+      e.target,
+      e.label,
+      e.kind,
+      e.origin,
+      e.weight ?? 1,
+      JSON.stringify(e.evidence ?? []),
+      e.confidence ?? null,
+      e.callSites ?? null,
+      now(),
+    );
   }
 
   updateEdge(id: string, patch: Partial<MapEdge>): void {
     const cur = this.allEdges().find((e) => e.id === id);
     if (!cur) return;
     const next = { ...cur, ...patch };
-    this.db.prepare('update edges set source = ?, target = ?, label = ?, kind = ?, origin = ?, weight = ? where id = ?')
-      .run(next.source, next.target, next.label, next.kind, next.origin, next.weight ?? 1, id);
+    this.db.prepare(
+      'update edges set source = ?, target = ?, label = ?, kind = ?, origin = ?, weight = ?, evidence = ?, confidence = ?, call_sites = ? where id = ?',
+    ).run(
+      next.source,
+      next.target,
+      next.label,
+      next.kind,
+      next.origin,
+      next.weight ?? 1,
+      JSON.stringify(next.evidence ?? []),
+      next.confidence ?? null,
+      next.callSites ?? null,
+      id,
+    );
   }
 
   deleteEdge(id: string): void {
