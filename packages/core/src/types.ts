@@ -303,9 +303,14 @@ export interface RepoFacts {
   /** Calls that cross files, resolved by name. The raw material for edge verbs. */
   calls: CallFact[];
   /**
-   * The files the rest of the repo leans on most — fan-in over imports, calls and cues, with
-   * entry points first. Computed, never asked of a model. Handed to the model so a small but
-   * central module cannot be quietly dropped from the map.
+   * How many files depend on each file — fan-in over imports, calls and cues, with the weight
+   * of an imported *directory* (a Go or Java package) carried to the files inside it. Computed,
+   * never asked of a model. Both the ranking below and the model's source index are built on it.
+   */
+  fanIn: Record<string, number>;
+  /**
+   * The files the rest of the repo leans on most, entry points first, from `fanIn`. Handed to
+   * the model so a small but central module cannot be quietly dropped from the map.
    */
   coreModules: string[];
   /** External packages actually imported, with the importer count. */

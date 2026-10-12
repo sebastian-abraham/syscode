@@ -187,7 +187,7 @@ function edgesForPair(sourceKey: string, targetKey: string, links: PairLinks): P
  */
 const MAX_EVIDENCE = 3;
 
-function sampleEvidence(sites: { path: string; line: number }[]): { path: string; line: number }[] {
+export function sampleEvidence(sites: { path: string; line: number }[]): { path: string; line: number }[] {
   const seen = new Set<string>();
   const out: { path: string; line: number }[] = [];
   for (const s of [...sites].sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line)) {
@@ -1037,6 +1037,48 @@ export function proposeMap(facts: RepoFacts): ProposedMap {
 
   layoutLevels(nodes, edges);
   return { nodes, edges };
+}
+
+/** The product's structural limits. A mapper — deterministic or a model — is clamped to these. */
+export const MAP_LIMITS = { MAX_AREAS, MAX_CHILDREN, MAX_DEPTH, MAX_FILES_PER_AREA } as const;
+
+/**
+ * The file-level children of one node, built exactly the way the deterministic mapper builds
+ * them: same grouping, same anchors, same wording. A model-named component therefore gets the
+ * same drill-down, the same `stale` detection and the same voice as any other node, and the
+ * interface needs no change to show it.
+ */
+export function fileChildren(files: FileFacts[], parentKey: string, level: number): ProposedNode[] {
+  if (files.length < 2) return [];
+  const groups =
+    files.length > MAX_CHILDREN ? clusterFiles(`${parentKey}#c`, files) : files.map((f) => fileGroup(f, level));
+  return groups.map((group) => {
+    const gFiles = group.files;
+    const anchors: Anchor[] = [];
+    for (const f of [...gFiles].sort((a, b) => b.loc - a.loc).slice(0, 12)) {
+      anchors.push({ path: f.path, kind: 'file', hash: f.hash, weight: 1 });
+    }
+    for (const f of gFiles.slice(0, 4)) {
+      for (const s of f.symbols.filter((x) => x.exported).slice(0, 2)) {
+        anchors.push({ path: f.path, kind: 'symbol', symbol: s.name, lines: [s.line, s.endLine], hash: f.hash, weight: 1 });
+      }
+    }
+    return {
+      key: group.key,
+      label: group.name,
+      kind: 'component',
+      level,
+      parentKey,
+      summary: groupSummary(group, ''),
+      detail: groupDetail(group),
+      anchors,
+      origin: 'verified' as Provenance,
+      position: { x: 0, y: 0 },
+      metrics: { files: gFiles.length, loc: locOf(gFiles), symbols: gFiles.reduce((n, f) => n + f.symbols.length, 0) },
+      heuristic: true,
+      files: gFiles.map((f) => f.path),
+    };
+  });
 }
 
 function areaDetail(files: FileFacts[]): string {

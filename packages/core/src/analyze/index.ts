@@ -181,9 +181,11 @@ export async function analyzeRepo(root: string, opts: ScanOptions = {}): Promise
   for (const c of calls) bump(c.to);
 
   const dirOf = (p: string): string => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
+  const fanIn: Record<string, number> = {};
+  for (const p of fileSet) fanIn[p] = (fileFanIn.get(p) ?? 0) + (dirFanIn.get(dirOf(p)) ?? 0);
   const entryPaths = new Set(files.filter((f) => f.isEntry).map((f) => f.path));
   const coreModules = [...fileSet]
-    .map((p) => ({ p, entry: entryPaths.has(p) ? 1 : 0, score: (fileFanIn.get(p) ?? 0) + (dirFanIn.get(dirOf(p)) ?? 0) }))
+    .map((p) => ({ p, entry: entryPaths.has(p) ? 1 : 0, score: fanIn[p] ?? 0 }))
     .sort((a, b) => b.entry - a.entry || b.score - a.score || a.p.localeCompare(b.p))
     .filter((x) => x.entry || x.score > 0)
     .slice(0, 12)
@@ -193,6 +195,7 @@ export async function analyzeRepo(root: string, opts: ScanOptions = {}): Promise
     root: abs,
     files,
     calls,
+    fanIn,
     coreModules,
     externals,
     entryPoints: files.filter((f) => f.isEntry).map((f) => f.path),

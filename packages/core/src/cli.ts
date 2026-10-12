@@ -142,8 +142,14 @@ async function main(): Promise<void> {
       for (const c of report.changes) console.log(`    • ${c.summary}`);
       console.log(`\n  ${report.proposalsCreated} proposal(s) queued — review them in the interface, nothing is applied without approval.\n`);
     } else if (firstMap) {
-      console.log('  first map built from the code. It is a starting point, not a verdict —');
-      console.log('  connect a model to name and explain it, or edit it by hand.\n');
+      const mapper = svc.store.getJson<{ kind?: string }>('project.mapper');
+      if (mapper?.kind === 'model') {
+        console.log('  map drawn by the model, then checked against the code: every part, purpose and');
+        console.log('  link below is anchored to real files, and a dashed link is one the code does not show.\n');
+      } else {
+        console.log('  first map built from the code. It is a starting point, not a verdict —');
+        console.log('  connect a model to name and explain it, or edit it by hand.\n');
+      }
     } else {
       console.log('  no changes since the last map — nodes keep their identity, positions and notes.\n');
     }

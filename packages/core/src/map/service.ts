@@ -2,6 +2,7 @@
  * The map service: the one object every surface talks to.
  * Owns the facts, the store, the proposal queue and the reconcile cycle.
  */
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { readFileSync } from 'node:fs';
 import type {
@@ -12,6 +13,7 @@ import { analyzeRepo } from '../analyze/index.ts';
 import { serviceLabel } from '../analyze/external.ts';
 import { newId, Store, type StoredNode } from '../store/db.ts';
 import { proposeMap, type ProposedMap, type ProposedNode } from './heuristic.ts';
+import { mapWithModel, type ModelMapResult } from './model.ts';
 import { applyReconcile, makeNode, reconcile } from './identity.ts';
 import { edgeConfidence } from './confidence.ts';
 import { brainInfo, loadConfig, resolveBrain, saveConfig, type Brain } from '../config.ts';
@@ -60,10 +62,10 @@ export class MapService {
 
     const nodeCount = store.stats().nodes;
     if (nodeCount === 0) {
-      svc.buildInitial();
+      await svc.buildInitial();
       store.log('engine', 'map-created', `Initial map: ${store.stats().nodes} nodes, ${store.stats().edges} edges.`);
     } else if (opts.refresh) {
-      svc.refresh();
+      await svc.refresh();
     }
     return svc;
   }
@@ -72,10 +74,74 @@ export class MapService {
     this.store.setMeta('project.name', name);
   }
 
+  /**
+   * Which mapper builds the map. `auto` means the model maps whenever one is connected — that
+   * is the product's promise, not a setting to hunt for. `SYSCODE_MAPPER=heuristic` restores the
+   * deterministic mapper exactly as it was, for tests or when a model is not wanted.
+   */
+  private mapperChoice(): 'model' | 'heuristic' {
+    const forced = (process.env.SYSCODE_MAPPER ?? '').toLowerCase();
+    if (forced === 'heuristic' || forced === 'model') return forced;
+    return this.brain.mode === 'model' ? 'model' : 'heuristic';
+  }
+
+  /**
+   * The model's map, or nothing with the reason written down. A mapper that quietly falls back
+   * to the deterministic one is worse than one that fails loudly: the developer would be looking
+   * at a directory tree and believing it was an architecture.
+   */
+  private async tryModelMap(): Promise<ProposedMap | undefined> {
+    if (this.mapperChoice() !== 'model') return undefined;
+    const started = Date.now();
+    try {
+      const r: ModelMapResult = await mapWithModel(this.brain, this.facts, {
+        onProgress: (note) => this.store.log('engine', 'mapper', note),
+      });
+      const seconds = ((Date.now() - started) / 1000).toFixed(1);
+      this.store.setMeta('project.mappurpose', r.purpose ?? '');
+      this.store.setJson('project.mapper', {
+        kind: 'model',
+        at: new Date().toISOString(),
+        ms: Date.now() - started,
+        factsHash: this.factsHash(),
+        ...r.stats,
+      });
+      this.store.log(
+        'engine',
+        'mapper',
+        `model map: ${r.stats.areas} parts, ${r.stats.components} components, ` +
+          `${r.stats.verifiedEdges} cited and ${r.stats.inferredEdges} inferred links, ` +
+          `${r.stats.passes} model calls in ${seconds}s`,
+      );
+      return r.proposed;
+    } catch (err) {
+      const message = (err as Error).message.slice(0, 300);
+      this.store.setJson('project.mapper', { kind: 'heuristic', at: new Date().toISOString(), error: message });
+      this.store.log('engine', 'mapper', `model mapping failed — this map is the deterministic fallback: ${message}`);
+      return undefined;
+    }
+  }
+
+  /** What the model map was built from. Mapping is expensive, so it is never done twice for
+      the same files: an unchanged repository means the stored map is already the answer. */
+  private factsHash(): string {
+    const digest = createHash('sha1');
+    for (const f of [...this.facts.files].sort((a, b) => a.path.localeCompare(b.path))) {
+      digest.update(`${f.path}:${f.hash}\n`);
+    }
+    return digest.digest('hex').slice(0, 16);
+  }
+
+  /** True when a model map is already stored for exactly these files. */
+  private modelMapIsCurrent(): boolean {
+    const last = this.store.getJson('project.mapper') as { kind?: string; factsHash?: string } | undefined;
+    return last?.kind === 'model' && last.factsHash === this.factsHash();
+  }
+
   /* ------------------------------------------------------------------ build */
 
-  buildInitial(): void {
-    const proposed = proposeMap(this.facts);
+  async buildInitial(): Promise<void> {
+    const proposed = (await this.tryModelMap()) ?? proposeMap(this.facts);
     this.lastProposed = proposed;
     const rec = reconcile(this.store, proposed.nodes, { mode: 'initial', hashes: this.hashMap() });
     applyReconcile(this.store, rec);
@@ -83,10 +149,25 @@ export class MapService {
     this.store.setJson('project.brain', brainInfo(this.brain));
   }
 
-  refresh(): RefreshReport {
+  async refresh(): Promise<RefreshReport> {
+    // The model already mapped exactly these files: re-running it would cost a dozen calls to
+    // re-derive the same answer, and a second answer that differs in wording would queue a pile
+    // of proposals nobody asked for. The map on screen is already the model's.
+    if (this.mapperChoice() === 'model' && this.modelMapIsCurrent()) {
+      this.store.log('engine', 'mapper', 'the model map is current for these files — nothing to re-map');
+      return {
+        scanned: { files: this.facts.totals.files, loc: this.facts.totals.loc },
+        changes: [],
+        proposalsCreated: 0,
+        staleCleared: 0,
+        staleMarked: 0,
+        applied: true,
+        brain: brainInfo(this.brain),
+      };
+    }
     // re-analyse happens in the CLI/server before this is called when the files moved;
     // here we work from the facts we hold, which the caller refreshes.
-    const proposed = proposeMap(this.facts);
+    const proposed = (await this.tryModelMap()) ?? proposeMap(this.facts);
     this.lastProposed = proposed;
     const rec = reconcile(this.store, proposed.nodes, { mode: 'refresh', hashes: this.hashMap() });
 
@@ -208,10 +289,11 @@ export class MapService {
       totalNodes: all.length,
       staleCount: all.filter((n) => n.stale).length,
       truncated,
-      // What this system is, for the headline: the mapping pass's opening sentence when
-      // there is memory, else composed from the facts. Recomputed per view because it is
-      // two string reads, and a cached headline that goes stale is worse than none.
-      purpose: projectPurpose(
+      // What this system is, for the headline: the model's own opening paragraph when it drew
+      // this map, else the mapping pass's sentence, else composed from the facts.
+      purpose:
+        (this.store.getMeta('project.mappurpose') ?? '').trim() ||
+        projectPurpose(
         this.store.getMeta('project.memory') ?? '',
         this.facts,
         all.filter((n) => n.parentId === null).length,

@@ -55,7 +55,7 @@ export interface RefineOutcome {
   raw?: string;
 }
 
-const ALLOWED_KINDS: NodeKind[] = ['system', 'subsystem', 'feature', 'component', 'data', 'external', 'concern', 'planned'];
+export const ALLOWED_KINDS: NodeKind[] = ['system', 'subsystem', 'feature', 'component', 'data', 'external', 'concern', 'planned'];
 
 function factsBrief(facts: RepoFacts): string {
   const langs = Object.entries(facts.totals.byLang)
