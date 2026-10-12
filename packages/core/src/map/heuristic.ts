@@ -11,7 +11,7 @@
  * is handed to the model, which keeps the responsibility for naming, grouping and
  * explanation — the facts keep it honest.
  */
-import type { Anchor, FileFacts, MapEdge, NodeKind, Provenance, RepoFacts, SymbolFact } from '../types.ts';
+import type { Anchor, CueKind, FileFacts, MapEdge, NodeKind, Provenance, RepoFacts, SymbolFact } from '../types.ts';
 import { serviceLabel } from '../analyze/external.ts';
 import { edgeConfidence } from './confidence.ts';
 
@@ -51,22 +51,50 @@ export interface ProposedEdge {
   callSites?: number;
 }
 
-/** Every link found between one pair of nodes, in the two shapes the code shows. */
+/** Every link found between one pair of nodes, in the shapes the code shows. */
 interface PairLinks {
   importSites: { path: string; line: number }[];
   calls: { symbol: string; path: string; line: number }[];
+  /** Links read out of the *text* of files we could not parse (cues). */
+  cueSites: { path: string; line: number; kind: CueKind; raw: string }[];
 }
 
 function addImportSite(into: Map<string, PairLinks>, key: string, path: string, line: number | undefined): void {
-  const rec = into.get(key) ?? { importSites: [], calls: [] };
+  const rec = into.get(key) ?? { importSites: [], calls: [], cueSites: [] };
   if (line !== undefined) rec.importSites.push({ path, line });
   into.set(key, rec);
 }
 
 function addCallSite(into: Map<string, PairLinks>, key: string, symbol: string, path: string, line: number): void {
-  const rec = into.get(key) ?? { importSites: [], calls: [] };
+  const rec = into.get(key) ?? { importSites: [], calls: [], cueSites: [] };
   rec.calls.push({ symbol, path, line });
   into.set(key, rec);
+}
+
+/**
+ * A link read from a file's text rather than from a parse — a Go package import, a page
+ * loading a stylesheet. It carries the line it was seen on, so the edge it produces is cited
+ * exactly like one built from a parsed import. This is what gives a stack with no analyzer
+ * edges that are still facts.
+ */
+function addCueSite(
+  into: Map<string, PairLinks>,
+  key: string,
+  path: string,
+  line: number,
+  kind: CueKind,
+  raw: string,
+): void {
+  const rec = into.get(key) ?? { importSites: [], calls: [], cueSites: [] };
+  rec.cueSites.push({ path, line, kind, raw });
+  into.set(key, rec);
+}
+
+/** What a cue says the link is. Only kinds that point at a path in this repo make edges. */
+function verbForCue(cue: { kind: CueKind }): { verb: string; kind: MapEdge['kind'] } | undefined {
+  if (cue.kind === 'import') return { verb: 'imports', kind: 'depends' };
+  if (cue.kind === 'asset') return { verb: 'loads', kind: 'depends' };
+  return undefined;
 }
 
 /**
@@ -108,6 +136,14 @@ function edgesForPair(sourceKey: string, targetKey: string, links: PairLinks): P
     const bucket = buckets.get(verb) ?? { verb, kind, sites: [] };
     bucket.sites.push({ path: call.path, line: call.line });
     buckets.set(verb, bucket);
+  }
+  // Cues are links too: a Go import, a page loading a script. Same bucket, same citation.
+  for (const cue of links.cueSites) {
+    const v = verbForCue(cue);
+    if (!v) continue;
+    const bucket = buckets.get(v.verb) ?? { verb: v.verb, kind: v.kind, sites: [] };
+    bucket.sites.push({ path: cue.path, line: cue.line });
+    buckets.set(v.verb, bucket);
   }
   // Most-used verb first, then alphabetical — so the same repo always lays out the same.
   const ordered = [...buckets.values()].sort(
@@ -917,6 +953,10 @@ export function proposeMap(facts: RepoFacts): ProposedMap {
 
   /* edges between areas: what the code actually does between them */
   const areaLinks = new Map<string, PairLinks>();
+  // A cue can name a directory rather than a file (a Go package, a Java package), so
+  // directories map to their area too — that is how `shopkit-go/internal/store` lands.
+  const areaByDir = new Map<string, string>();
+  for (const plan of plans) for (const f of plan.files) areaByDir.set(dirOf(f.path), plan.key);
   for (const plan of plans) {
     for (const f of plan.files) {
       for (const imp of f.imports) {
@@ -924,6 +964,12 @@ export function proposeMap(facts: RepoFacts): ProposedMap {
         const other = areaByFile.get(imp.resolved);
         if (!other || other === plan.key) continue;
         addImportSite(areaLinks, `${plan.key}\u0000${other}`, f.path, imp.line);
+      }
+      for (const cue of f.cues ?? []) {
+        if (!cue.target) continue;
+        const other = areaByFile.get(cue.target) ?? areaByDir.get(cue.target);
+        if (!other || other === plan.key) continue;
+        addCueSite(areaLinks, `${plan.key}\u0000${other}`, f.path, cue.line, cue.kind, cue.raw);
       }
     }
   }
@@ -948,6 +994,8 @@ export function proposeMap(facts: RepoFacts): ProposedMap {
   for (const [, siblings] of byParent) {
     const owner = new Map<string, ProposedNode>();
     for (const s of siblings) for (const f of s.files) owner.set(f, s);
+    const ownerDir = new Map<string, ProposedNode>();
+    for (const s of siblings) for (const f of s.files) ownerDir.set(dirOf(f), s);
     const pairLinks = new Map<string, PairLinks>();
     for (const s of siblings) {
       for (const f of s.files) {
@@ -958,6 +1006,12 @@ export function proposeMap(facts: RepoFacts): ProposedMap {
           const other = owner.get(imp.resolved);
           if (!other || other.key === s.key) continue;
           addImportSite(pairLinks, `${s.key}\u0000${other.key}`, f, imp.line);
+        }
+        for (const cue of ff.cues ?? []) {
+          if (!cue.target) continue;
+          const other = owner.get(cue.target) ?? ownerDir.get(cue.target);
+          if (!other || other.key === s.key) continue;
+          addCueSite(pairLinks, `${s.key}\u0000${other.key}`, f, cue.line, cue.kind, cue.raw);
         }
       }
     }

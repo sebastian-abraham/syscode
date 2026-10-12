@@ -4,12 +4,13 @@
  */
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { CallFact, FileFacts, RepoFacts } from '../types.ts';
+import type { CallFact, CueFact, FileFacts, RepoFacts } from '../types.ts';
 import { CODE_LANGS, scanRepo, type ScanOptions, type ScannedFile } from './scan.ts';
 import { analyzeTsJs, buildPathIndex, isTsJs } from './tsjs.ts';
 import { analyzePython } from './py.ts';
 
-import { classifyExternal, serviceLabel } from './external.ts';
+import { classifyExternal, classifyPackagePath, serviceLabel } from './external.ts';
+import { extractCues, goModuleName, type CueContext } from './cues.ts';
 
 export { serviceLabel };
 
@@ -105,6 +106,30 @@ export async function analyzeRepo(root: string, opts: ScanOptions = {}): Promise
     byLang[f.lang].loc += f.loc;
   }
 
+  // ── Cues ────────────────────────────────────────────────────────────────────────────────
+  // What the files we could not parse say about the rest of the system. Deterministic,
+  // line-numbered, and the reason a Go or Rust repo can have cited edges at all.
+  const fileSet = new Set(files.map((f) => f.path));
+  const dirSet = new Set<string>();
+  for (const p of fileSet) {
+    let d = p;
+    while (d.includes('/')) {
+      d = d.slice(0, d.lastIndexOf('/'));
+      dirSet.add(d);
+    }
+  }
+  const goModule = await readGoModule(abs);
+  const ctx: CueContext = { files: fileSet, dirs: dirSet, ...(goModule ? { goModule } : {}) };
+  const scannedByPath = new Map(scanned.map((s) => [s.path, s]));
+
+  for (const f of files) {
+    if (!f.unparsed) continue;
+    const src = scannedByPath.get(f.path);
+    if (!src) continue;
+    const cues = extractCues(src, ctx);
+    if (cues.length) f.cues = cues;
+  }
+
   const usage = new Map<string, number>();
   for (const f of files) {
     const seen = new Set<string>();
@@ -115,14 +140,60 @@ export async function analyzeRepo(root: string, opts: ScanOptions = {}): Promise
       usage.set(imp.package, (usage.get(imp.package) ?? 0) + 1);
     }
   }
+
+  // Cues add externals for stacks with no parser: a Go import of
+  // `github.com/redis/go-redis/v9` is Redis, and the map should be able to say so. Compose
+  // files are not part of the code map, but the services they name are real dependencies.
+  const addCueExternals = (cues: CueFact[]): void => {
+    const seen = new Set<string>();
+    for (const cue of cues) {
+      if (cue.kind !== 'import' || cue.target) continue;
+      const hit = classifyPackagePath(cue.raw);
+      if (hit.kind !== 'service' || !hit.key || seen.has(hit.key)) continue;
+      seen.add(hit.key);
+      usage.set(hit.key, (usage.get(hit.key) ?? 0) + 1);
+    }
+  };
+  for (const f of files) if (f.cues) addCueExternals(f.cues);
+  for (const s of scanned) {
+    if (fileSet.has(s.path) || s.lang !== 'yaml') continue;
+    addCueExternals(extractCues(s, ctx));
+  }
+
   const externals = [...usage.entries()]
     .map(([name, usedBy]) => ({ name, usedBy, kind: classifyExternal(name) }))
     .sort((a, b) => b.usedBy - a.usedBy || a.name.localeCompare(b.name));
 
+  // ── Rank ────────────────────────────────────────────────────────────────────────────────
+  // Fan-in over imports, calls and cues: the files the rest of the repo leans on. Imported
+  // directories (Go packages, Java packages) carry their weight to the files inside them.
+  const calls = resolveCalls(files);
+  const fileFanIn = new Map<string, number>();
+  const dirFanIn = new Map<string, number>();
+  const bump = (target: string): void => {
+    if (fileSet.has(target)) fileFanIn.set(target, (fileFanIn.get(target) ?? 0) + 1);
+    else if (dirSet.has(target)) dirFanIn.set(target, (dirFanIn.get(target) ?? 0) + 1);
+  };
+  for (const f of files) {
+    for (const imp of f.imports) if (imp.resolved) bump(imp.resolved);
+    for (const cue of f.cues ?? []) if (cue.target) bump(cue.target);
+  }
+  for (const c of calls) bump(c.to);
+
+  const dirOf = (p: string): string => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
+  const entryPaths = new Set(files.filter((f) => f.isEntry).map((f) => f.path));
+  const coreModules = [...fileSet]
+    .map((p) => ({ p, entry: entryPaths.has(p) ? 1 : 0, score: (fileFanIn.get(p) ?? 0) + (dirFanIn.get(dirOf(p)) ?? 0) }))
+    .sort((a, b) => b.entry - a.entry || b.score - a.score || a.p.localeCompare(b.p))
+    .filter((x) => x.entry || x.score > 0)
+    .slice(0, 12)
+    .map((x) => x.p);
+
   return {
     root: abs,
     files,
-    calls: resolveCalls(files),
+    calls,
+    coreModules,
     externals,
     entryPoints: files.filter((f) => f.isEntry).map((f) => f.path),
     totals: {
@@ -132,6 +203,15 @@ export async function analyzeRepo(root: string, opts: ScanOptions = {}): Promise
     },
     scannedAt: new Date().toISOString(),
   };
+}
+
+/** The module name from go.mod, so `shopkit-go/internal/orders` resolves to `internal/orders`. */
+async function readGoModule(root: string): Promise<string | undefined> {
+  try {
+    return goModuleName(await readFile(path.join(root, 'go.mod'), 'utf8'));
+  } catch {
+    return undefined;
+  }
 }
 
 export type { ScannedFile };

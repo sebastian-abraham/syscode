@@ -218,6 +218,12 @@ export interface FileFacts {
    * is the map implying it understood code it never read.
    */
   unparsed?: boolean;
+  /**
+   * What the file says about the rest of the system in a language we cannot parse. Set for
+   * counted-not-read files: it is how a stack with no analyzer still gets cited edges, and
+   * how the model is told what a Go or SQL file actually touches.
+   */
+  cues?: CueFact[];
 }
 
 export interface ImportFact {
@@ -228,6 +234,23 @@ export interface ImportFact {
   package?: string;
   /** 1-based line of the import statement — the citation an edge carries. */
   line?: number;
+}
+
+export type CueKind = 'import' | 'table' | 'service' | 'asset' | 'route';
+
+/**
+ * Something a file says about the rest of the system, read from its text rather than from a
+ * parse — a Go or Rust import, a SQL table, a compose service, an HTML asset. Every cue
+ * carries the line it was seen on, so an edge built from one can be cited instead of guessed.
+ * `target` is set only when the repository really has the path the cue names.
+ */
+export interface CueFact {
+  kind: CueKind;
+  /** what the file says, verbatim */
+  raw: string;
+  /** repo-relative path (file or directory) this cue points at, when the repo has it */
+  target?: string;
+  line: number;
 }
 
 export interface SymbolFact {
@@ -279,6 +302,12 @@ export interface RepoFacts {
   files: FileFacts[];
   /** Calls that cross files, resolved by name. The raw material for edge verbs. */
   calls: CallFact[];
+  /**
+   * The files the rest of the repo leans on most — fan-in over imports, calls and cues, with
+   * entry points first. Computed, never asked of a model. Handed to the model so a small but
+   * central module cannot be quietly dropped from the map.
+   */
+  coreModules: string[];
   /** External packages actually imported, with the importer count. */
   externals: { name: string; usedBy: number; kind: 'runtime' | 'service' | 'framework' | 'unknown' }[];
   entryPoints: string[];
