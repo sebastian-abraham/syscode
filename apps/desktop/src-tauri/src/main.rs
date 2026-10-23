@@ -1,3 +1,4 @@
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 // SysCode desktop shell.
 //
 // The engine and the interface are deliberately separate (see docs/CONTRACT.md):
@@ -9,14 +10,25 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 const DEFAULT_PORT: u16 = 4317;
-/// Where the `SYSCODE_FPS_PROBE` harness writes its measurement.
-const FPS_PROBE_FILE: &str = "/tmp/syscode-fps.json";
+/// Where the `SYSCODE_FPS_PROBE` harness writes its measurement. The OS temp directory,
+/// not a hardcoded `/tmp`: this file has to be written on every platform we build for.
+fn fps_probe_file() -> std::path::PathBuf {
+    std::env::temp_dir().join("syscode-fps.json")
+}
+
+/// The engine's file name, which carries `.exe` on Windows.
+const ENGINE_BIN: &str = if cfg!(windows) {
+    "syscode-engine.exe"
+} else {
+    "syscode-engine"
+};
 
 struct EngineProcess(Mutex<Option<Child>>);
 
@@ -25,6 +37,28 @@ fn port_open(port: u16) -> bool {
     match addr.parse() {
         Ok(sock) => TcpStream::connect_timeout(&sock, Duration::from_millis(400)).is_ok(),
         Err(_) => false,
+    }
+}
+
+/// The interface's Vite dev server, when this is a `tauri dev` run and it is actually up.
+///
+/// In development the window loads Vite: hot reload works, and a fresh clone needs no
+/// `npm run build:web` before the first launch. A packaged build carries no `dev_url`, and
+/// a stale one is ignored because nothing is listening on it — so the engine's own copy of
+/// the interface wins there.
+fn dev_server_url(app: &tauri::AppHandle) -> Option<tauri::Url> {
+    use std::net::ToSocketAddrs;
+    let url = app.config().build.dev_url.clone()?;
+    let host = url.host_str()?.to_string();
+    let port = url.port_or_known_default()?;
+    let addrs: Vec<std::net::SocketAddr> = (host.as_str(), port).to_socket_addrs().ok()?.collect();
+    if addrs
+        .iter()
+        .any(|addr| TcpStream::connect_timeout(addr, Duration::from_millis(400)).is_ok())
+    {
+        Some(url)
+    } else {
+        None
     }
 }
 
@@ -78,28 +112,58 @@ fn repo_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// The project the shell opens when nothing more specific is given.
-///
-/// A source checkout is preferred (dev mode is unchanged). A packaged app has no
-/// checkout, and its process working directory is the read-only install directory
-/// (AppRun `chdir`s into the AppImage mount), so pointing the engine there fails when it
-/// tries to create `.syscode`. Fall back to a writable, SysCode-owned workspace; the
-/// start screen opens a real project from there.
-fn default_project() -> PathBuf {
+/// The user's home directory, on any platform. Windows sets `USERPROFILE`, not `HOME`.
+fn home_dir() -> Option<PathBuf> {
+    for key in ["HOME", "USERPROFILE"] {
+        if let Some(v) = std::env::var_os(key) {
+            if !v.is_empty() {
+                return Some(PathBuf::from(v));
+            }
+        }
+    }
+    None
+}
+
+/// The source checkout this shell is running from, if any.
+fn checkout_root() -> Option<PathBuf> {
     if let Ok(cwd) = std::env::current_dir() {
         if let Some(root) = find_repo_root_from(&cwd) {
-            return root;
+            return Some(root);
         }
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             if let Some(root) = find_repo_root_from(dir) {
-                return root;
+                return Some(root);
             }
         }
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let workspace = PathBuf::from(home).join(".local/share/syscode/workspace");
+    None
+}
+
+/// The project the shell opens when nothing more specific is given.
+///
+/// A source checkout is preferred, and inside a checkout the demo fixture wins: the tool's
+/// own repository is a large map, and a first run should show something in seconds rather
+/// than sitting through a two-minute model build. A packaged app has no checkout, and its
+/// process working directory is the read-only install directory (AppRun `chdir`s into the
+/// AppImage mount), so pointing the engine there fails when it tries to create `.syscode`.
+/// Fall back to a writable, SysCode-owned workspace; the start screen opens a real project
+/// from there.
+fn default_project() -> PathBuf {
+    if let Some(root) = checkout_root() {
+        let demo = root.join("fixtures/demo-app");
+        if demo.is_dir() {
+            return demo;
+        }
+        return root;
+    }
+    if let Some(home) = home_dir() {
+        let workspace = if cfg!(windows) {
+            home.join("AppData").join("Local").join("syscode").join("workspace")
+        } else {
+            home.join(".local/share/syscode/workspace")
+        };
         if std::fs::create_dir_all(&workspace).is_ok() {
             return workspace;
         }
@@ -129,8 +193,14 @@ fn find_engine() -> Option<Engine> {
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // Packaged layouts: next to the binary, or in a resources folder.
-            for rel in ["syscode-engine", "engine/syscode-engine", "../Resources/syscode-engine", "../resources/engine/syscode-engine"] {
+            // Packaged layouts: next to the binary, or in a resources folder. The `engine/`
+            // entry is what `tauri.conf.json` maps the bundled payload to.
+            for rel in [
+                ENGINE_BIN,
+                &format!("engine/{ENGINE_BIN}"),
+                &format!("../Resources/{ENGINE_BIN}"),
+                &format!("../resources/engine/{ENGINE_BIN}"),
+            ] {
                 let candidate = dir.join(rel);
                 if candidate.exists() {
                     return Some(Engine::Bundled(candidate));
@@ -180,7 +250,7 @@ fn configure_bundled_resources(app: &tauri::AppHandle) {
         Ok(dir) => dir,
         Err(_) => return,
     };
-    let engine = dir.join("engine").join("syscode-engine");
+    let engine = dir.join("engine").join(ENGINE_BIN);
     if engine.exists() && std::env::var_os("SYSCODE_ENGINE").is_none() {
         std::env::set_var("SYSCODE_ENGINE", &engine);
     }
@@ -190,10 +260,23 @@ fn configure_bundled_resources(app: &tauri::AppHandle) {
     }
 }
 
+/// True while an engine start is in flight, so the window's "Start engine" button and the
+/// background start a dev run does cannot both spawn one (two engines, one port).
+static ENGINE_STARTING: AtomicBool = AtomicBool::new(false);
+
 fn spawn_engine(project: &str, port: u16) -> Result<(String, Option<Child>), String> {
     if port_open(port) {
         return Ok((format!("engine already listening on {port}"), None));
     }
+    if ENGINE_STARTING.swap(true, Ordering::SeqCst) {
+        return Err("the engine is already starting (a first map build can take a minute); retry shortly".to_string());
+    }
+    let result = spawn_engine_inner(project, port);
+    ENGINE_STARTING.store(false, Ordering::SeqCst);
+    result
+}
+
+fn spawn_engine_inner(project: &str, port: u16) -> Result<(String, Option<Child>), String> {
     let engine = find_engine().ok_or_else(|| {
         "no SysCode engine found. Set SYSCODE_ENGINE to a standalone engine, SYSCODE_REPO to a \
          checkout, or start one with `npm run serve`."
@@ -204,6 +287,11 @@ fn spawn_engine(project: &str, port: u16) -> Result<(String, Option<Child>), Str
     let out = std::fs::File::create(&log).map_err(|e| e.to_string())?;
     let err = out.try_clone().map_err(|e| e.to_string())?;
 
+    // The engine must not outlive the app. Parent-death signals are the obvious tool and the
+    // wrong one: on Linux PR_SET_PDEATHSIG follows the *thread* that spawned the child (a
+    // worker thread finishing would take the engine with it), and Windows has no equivalent.
+    // So the engine is told the shell's pid and watches it (see `cli.ts serve`), which is the
+    // same mechanism on every platform.
     let mut command = match &engine {
         Engine::Bundled(path) => {
             let mut c = Command::new(path);
@@ -223,21 +311,16 @@ fn spawn_engine(project: &str, port: u16) -> Result<(String, Option<Child>), Str
             c
         }
     };
+    command.env("SYSCODE_PARENT_PID", std::process::id().to_string());
 
-    // The engine must not outlive the app: an abrupt kill (crash, SIGKILL, a terminal
-    // Ctrl-C) never reaches the exit handler that takes the child down, and the leftover
-    // engine keeps holding the port. PR_SET_PDEATHSIG ties it to this process.
-    #[cfg(target_os = "linux")]
+    // Windows: `node` (and the console-subsystem engine executable) is a console program, and
+    // spawning it from a windowed app opens a black console window beside the UI. CREATE_NO_WINDOW
+    // starts it with no console at all; its output already goes to the log file.
+    #[cfg(windows)]
     {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            command.pre_exec(|| {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
     }
 
     let child = command
@@ -245,7 +328,10 @@ fn spawn_engine(project: &str, port: u16) -> Result<(String, Option<Child>), Str
         .stderr(Stdio::from(err))
         .spawn()
         .map_err(|e| format!("could not start the engine: {e}"))?;
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // A first map can take a couple of minutes (a model mapping a project it has not seen),
+    // and the engine only starts listening once that build is done. Wait long enough to
+    // report the truth instead of a premature failure; the window shows a retry meanwhile.
+    let deadline = Instant::now() + Duration::from_secs(180);
     while Instant::now() < deadline {
         if port_open(port) {
             let how = match &engine {
@@ -485,9 +571,10 @@ fn start_probe_listener(app: tauri::AppHandle) -> u16 {
                     println!("[syscode][fps] ignoring blank-document report: {body}");
                     continue;
                 }
-                let _ = std::fs::write(FPS_PROBE_FILE, &body);
+                let file = fps_probe_file();
+                let _ = std::fs::write(&file, &body);
                 println!("[syscode][fps] {body}");
-                println!("[syscode][fps] wrote {FPS_PROBE_FILE}");
+                println!("[syscode][fps] wrote {}", file.display());
                 std::thread::sleep(Duration::from_millis(200));
                 // Quit through the event loop (main thread) rather than std::process::exit
                 // from this thread, so GTK/WebKit tear down cleanly.
@@ -694,19 +781,42 @@ fn main() {
         .setup(move |app| {
             // Make the bundled engine + interface discoverable before the first spawn.
             configure_bundled_resources(app.handle());
-            let spawn_result = spawn_engine(&project, port);
-            match spawn_result {
-                Ok((msg, child)) => {
-                    println!("[syscode] {msg}");
-                    // Hold the child so closing the window takes the engine down with it
-                    // instead of leaving a process holding the port.
-                    if let Some(state) = app.try_state::<EngineProcess>() {
-                        if let Ok(mut guard) = state.0.lock() {
-                            *guard = child;
+
+            // In a dev run the window can open immediately on Vite, with the engine starting
+            // behind it: the interface has its own "waiting for the engine" state and a
+            // Start-engine button, so a slow first map never blocks the window. In a packaged
+            // build there is no dev server, so the engine has to be up before the window can
+            // load the interface from it.
+            let dev = dev_server_url(app.handle());
+            println!("[syscode] project: {project}");
+            if dev.is_some() {
+                let handle = app.handle().clone();
+                let project = project.clone();
+                std::thread::spawn(move || match spawn_engine(&project, port) {
+                    Ok((msg, child)) => {
+                        println!("[syscode] {msg}");
+                        if let Some(state) = handle.try_state::<EngineProcess>() {
+                            if let Ok(mut guard) = state.0.lock() {
+                                *guard = child;
+                            }
                         }
                     }
+                    Err(err) => eprintln!("[syscode] engine unavailable: {err}"),
+                });
+            } else {
+                match spawn_engine(&project, port) {
+                    Ok((msg, child)) => {
+                        println!("[syscode] {msg}");
+                        // Hold the child so closing the window takes the engine down with it
+                        // instead of leaving a process holding the port.
+                        if let Some(state) = app.try_state::<EngineProcess>() {
+                            if let Ok(mut guard) = state.0.lock() {
+                                *guard = child;
+                            }
+                        }
+                    }
+                    Err(err) => eprintln!("[syscode] engine unavailable: {err}"),
                 }
-                Err(err) => eprintln!("[syscode] engine unavailable: {err}"),
             }
             let init = format!(
                 "window.__SYSCODE_API_BASE__ = 'http://127.0.0.1:{port}'; window.__SYSCODE_DESKTOP__ = true; window.__SYSCODE_FPS_INTERACT__ = {}; window.__SYSCODE_FPS_HOLD__ = {}; window.__SYSCODE_FPS_ZOOM__ = {};",
@@ -715,11 +825,27 @@ fn main() {
                 std::env::var("SYSCODE_FPS_ZOOM").ok().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0)
             );
 
-            // If the engine is up, load the interface *from* it: same origin, so the API
-            // calls need no CORS, and the window always matches the running engine rather
-            // than whatever was baked into this binary. Otherwise fall back to the
-            // embedded build, which shows its own "waiting for the engine" state.
-            let url = if port_open(port) {
+            // If this is a dev run and Vite is up, load the interface from Vite (hot reload,
+            // and no prior `npm run build:web`). Otherwise load the interface *from the
+            // engine*: same origin, so the API calls need no CORS, and the window always
+            // matches the running engine rather than whatever was baked into this binary.
+            // With no engine at all, fall back to the embedded build, which shows its own
+            // "waiting for the engine" state.
+            // Give a healthy engine a moment to bind before the window appears: with an existing
+            // map it is ready in a second or two, and nobody should see a waiting screen for
+            // that. A slow first map opens the window anyway — the interface keeps probing
+            // `/api/health` on its waiting screen and reconnects by itself.
+            if dev.is_some() {
+                let grace = Instant::now() + Duration::from_secs(4);
+                while Instant::now() < grace && !port_open(port) {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+
+            let url = if let Some(dev) = dev {
+                println!("[syscode] interface from the dev server at {dev}");
+                WebviewUrl::External(dev)
+            } else if port_open(port) {
                 match format!("http://127.0.0.1:{port}").parse() {
                     Ok(parsed) => WebviewUrl::External(parsed),
                     Err(_) => WebviewUrl::App("index.html".into()),

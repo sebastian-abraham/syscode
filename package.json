@@ -9,18 +9,23 @@
     "apps/*"
   ],
   "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "doctor": "node scripts/setup.mjs --check",
+    "dev": "npm run dev -w @syscode/desktop",
+    "dev:desktop": "npm run dev -w @syscode/desktop",
     "map": "node packages/core/src/cli.ts map",
     "serve": "node packages/core/src/cli.ts serve",
     "show": "node packages/core/src/cli.ts show",
     "web": "npm run dev -w @syscode/web",
+    "dev:web": "npm run dev -w @syscode/web",
     "build:web": "npm run build -w @syscode/web",
     "build:engine": "node scripts/build-engine.mjs",
-    "package:desktop": "npm run build:web && npm run build:engine && npm run build -w @syscode/desktop",
+    "package:desktop": "node scripts/package-desktop.mjs",
     "verify": "bash scripts/smoke.sh && bash scripts/stability.sh",
     "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p apps/web/tsconfig.json"
   },
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.18"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

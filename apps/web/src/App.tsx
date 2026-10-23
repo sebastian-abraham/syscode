@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { api } from './api.ts';
 import { StoreProvider, useStore } from './store.tsx';
 import { UiProvider, useUi } from './ui.tsx';
 import HeaderBar from './components/HeaderBar.tsx';
@@ -38,6 +39,39 @@ function Shell() {
     clearSelection,
   } = useStore();
   const { chatOpen, setChatOpen } = useUi();
+
+  // The desktop shell starts the engine as a child process, so this window can be on screen
+  // before the engine is listening — and a first map can take a minute or two. Probe while the
+  // app is on the waiting screen and reconnect as soon as the engine answers, so a slow start
+  // heals itself instead of parking on "waiting for the engine" until someone clicks Retry.
+  // (`init` flips the status to `loading` on purpose, so it is only called once health is ok —
+  // polling `init` itself would flash the splash screen every second.)
+  useEffect(() => {
+    if (status !== 'waiting') return undefined;
+    let cancelled = false;
+    let busy = false;
+    const id = window.setInterval(() => {
+      if (busy) return;
+      busy = true;
+      void (async () => {
+        try {
+          const health = await api.health();
+          if (!cancelled && health?.ok) {
+            window.clearInterval(id);
+            await init();
+          }
+        } catch {
+          /* still starting (or still down) — keep waiting */
+        } finally {
+          busy = false;
+        }
+      })();
+    }, 700);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [status, init]);
 
   // Esc climbs out of the current level (or closes a dialog first). Dialogs and
   // the inline connect form handle their own Esc in the capture phase.

@@ -314,6 +314,27 @@ async function main(): Promise<void> {
   if (cmd === 'serve') {
     const port = Number(flags.port ?? 4317);
     const server = await startServer(root, { port, host: typeof flags.host === 'string' ? flags.host : undefined });
+
+    // Exit when the shell that started us is gone.
+    //
+    // The desktop app sets SYSCODE_PARENT_PID to its own pid. Parent-death signals are not
+    // usable for this: on Linux terminal PR_SET_PDEATHSIG follows the *thread* that spawned
+    // the child (so a worker thread finishing takes the engine with it), and Windows has no
+    // equivalent at all. Probing the pid works the same everywhere, and costs one syscall
+    // every couple of seconds. `kill(pid, 0)` only checks for existence.
+    const parentPid = Number(process.env.SYSCODE_PARENT_PID ?? '');
+    if (Number.isInteger(parentPid) && parentPid > 0) {
+      const watch = setInterval(() => {
+        try {
+          process.kill(parentPid, 0);
+        } catch {
+          clearInterval(watch);
+          void server.close().finally(() => process.exit(0));
+        }
+      }, 2000);
+      watch.unref();
+    }
+
     const project = svc.project();
     console.log(`\n  SysCode  ·  ${project.name}`);
     console.log(`  map      ${project.stats.nodeCount} nodes · ${project.stats.edgeCount} edges · ${project.stats.pendingProposals} pending proposal(s)`);

@@ -17,13 +17,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "appimage"],
-    "icon": ["icons/icon.png"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
     "category": "DeveloperTool",
-    "shortDescription": "A living design map for agent-built software",
-    "resources": {
-      "../../../dist/engine/syscode-engine": "engine/syscode-engine",
-      "../../../dist/engine/web": "web"
-    }
+    "shortDescription": "A living design map for agent-built software"
   }
 }

@@ -32,7 +32,7 @@ const entry = path.join(repoRoot, 'packages/core/src/cli.ts');
 const bundlePath = path.join(outDir, 'cli.cjs');
 const seaConfigPath = path.join(outDir, 'sea-config.json');
 const blobPath = path.join(outDir, 'syscode-engine.blob');
-const enginePath = path.join(outDir, 'syscode-engine');
+const enginePath = path.join(outDir, process.platform === 'win32' ? 'syscode-engine.exe' : 'syscode-engine');
 const webSrc = path.join(repoRoot, 'apps/web/dist');
 const webDest = path.join(outDir, 'web');
 
@@ -116,7 +116,7 @@ function main() {
 
   // 4. Make it executable and ship the interface beside it. The desktop shell points
   //    SYSCODE_WEB at this directory so the engine serves the bundled UI.
-  chmodSync(enginePath, 0o755);
+  if (process.platform !== 'win32') chmodSync(enginePath, 0o755);
   cpSync(webSrc, webDest, { recursive: true });
 
   const size = statSync(enginePath).size;

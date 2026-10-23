@@ -41,17 +41,30 @@ and a developer still needs to see the system at the level they care about.
 
 ## Quickstart
 
-Requires **Node ≥ 22.5** (the engine runs TypeScript directly — no build step) and npm.
-
 ```bash
-npm install                 # this repo pins include=dev; see .npmrc
+git clone https://github.com/sebastian-abraham/syscode.git
+cd syscode
+npm install
+npm run setup     # checks Node, Rust and the webview libs; names anything missing
+npm run dev       # engine + canvas in a native window
 ```
 
-Map a project and look at it from the terminal:
+Requires **Node ≥ 22.18** (24 LTS is the tested default — the engine runs TypeScript
+directly, no build step). The desktop window additionally needs **Rust** and your platform's
+webview libraries; `npm run setup` checks all of it and prints the exact install command for
+your OS. Full per-OS instructions, PowerShell equivalents and a troubleshooting table:
+**[docs/RUNNING.md](docs/RUNNING.md)**.
+
+The app opens `fixtures/demo-app` when it is started from a checkout; point it at your own
+code with `SYSCODE_PROJECT=/path/to/project npm run dev`. **`npm run dev` is the supported
+command** — `npx tauri dev` resolves an unrelated npm package called `tauri` and fails with a
+misleading error.
+
+Terminal only — no UI, no Rust:
 
 ```bash
 npm run map   -- fixtures/demo-app     # build/update the map, report what changed
-npm run serve -- fixtures/demo-app     # engine + interface on http://127.0.0.1:4317
+npm run serve -- fixtures/demo-app     # engine on http://127.0.0.1:4317 (UI too, once built)
 ```
 
 The map is stored per project in `<project>/.syscode/syscode.db` (SQLite). Nothing is written
@@ -78,17 +91,22 @@ node packages/core/src/cli.ts workspace                      # projects opened b
 ### Interface
 
 ```bash
-npm run web            # Vite dev server on :5173, proxying /api to the engine
+npm run dev:web        # Vite dev server on :5173, proxying /api to a running engine
 npm run build:web      # or build it once; the engine then serves it at :4317
 ```
 
 ### Desktop
 
 ```bash
-npm run cargo:build -w @syscode/desktop        # cargo build --release, no bundling
-npx tauri build -w @syscode/desktop            # full bundle (deb/AppImage), needs @tauri-apps/cli
-SYSCODE_PROJECT=/path/to/project ./apps/desktop/src-tauri/target/release/syscode-desktop
+npm run dev                                    # the normal way to run it: Vite + engine + window
+SYSCODE_PROJECT=/path/to/project npm run dev   # ... on a project other than the fixture
+npm run package:desktop                        # this OS's installer (see docs/RUNNING.md §7)
 ```
+
+The packaged app is self-contained — it carries the engine and the interface, and needs no
+repository and no system Node. Installers are per-OS and land in
+`apps/desktop/src-tauri/target/release/bundle/`. A plain `cargo build --release` (no bundling)
+is `npm run cargo:build -w @syscode/desktop`.
 
 ### Connecting a model
 
@@ -120,9 +138,11 @@ Two scripted suites drive the real HTTP API and assert the product rules from th
 
 ```bash
 npm run serve -- fixtures/demo-app &        # port 4317
-./scripts/smoke.sh                          # 28 checks: read, write, agent, approval, delete
+./scripts/smoke.sh                          # 32 checks on the fixture: read, write, agent, approval, delete
 ./scripts/stability.sh                      # 13 checks: stale detection, identity, protected edits
 ```
+
+Both are bash; on Windows run them from Git Bash or WSL (the app itself does not need bash).
 
 `stability.sh` is the interesting one. It renames a node and pins it, appends a function to
 `src/orders/create-order.ts`, refreshes, and then asserts that:

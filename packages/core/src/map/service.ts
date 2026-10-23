@@ -645,7 +645,10 @@ export class MapService {
       case 'reanchor-node':
         this.store.updateNode(op.nodeId, {
           anchors: op.anchors,
-          files: [...new Set(op.anchors.map((a) => a.path))],
+          // Only files. A directory anchor is a *place*, not a covered file — including it
+          // here makes the node's file set differ from the mapper's on every rebuild, so
+          // reconcile would propose the same re-anchor forever.
+          files: [...new Set(op.anchors.filter((a) => a.kind !== 'dir').map((a) => a.path))],
           stale: false,
         });
         break;
