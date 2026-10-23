@@ -399,6 +399,11 @@ async function handleApi(
       'cache-control': 'no-cache',
       connection: 'keep-alive',
       'x-accel-buffering': 'no',
+      // An SSE response is a normal CORS response as far as the browser is concerned: without
+      // this header the stream is blocked when the interface runs on another origin (Vite in
+      // development). WebKit reports that as a bare "Load failed", which is indistinguishable
+      // from the engine being down.
+      ...corsHeaders(req),
     });
     res.write(': connected\n\n');
     const onChange = (payload: unknown) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
@@ -488,6 +493,9 @@ async function handleApi(
         'cache-control': 'no-cache',
         connection: 'keep-alive',
         'x-accel-buffering': 'no',
+        // Same reason as /api/events: the chat stream is fetched from the interface's origin
+        // (Vite on :5173 in dev), so the response itself must carry the CORS grant.
+        ...corsHeaders(req),
       });
       const send = (event: ChatEvent) => res.write(`data: ${JSON.stringify(event)}\n\n`);
       // First event: the conversation this stream is writing into, so the client learns the id.
